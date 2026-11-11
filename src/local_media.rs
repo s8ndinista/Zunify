@@ -335,6 +335,9 @@ pub(crate) fn scan(root: &Path, version: u64) -> Result<Library, String> {
                 },
                 ..Item::default()
             };
+            for track in group.iter_mut() {
+                track.item.album_id.clone_from(&album.id);
+            }
             library.album_tracks.insert(
                 album.id.clone(),
                 group.iter().map(|track| track.item.clone()).collect(),

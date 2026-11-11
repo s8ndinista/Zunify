@@ -457,6 +457,7 @@ pub fn item(value: &Value) -> Option<Item> {
         title: str_field(value, "name").to_owned(),
         artist,
         album: str_field(&value["album"], "name").to_owned(),
+        album_id: str_field(&value["album"], "uri").to_owned(),
         art: art.to_owned(),
         duration: value["duration_ms"].as_f64().unwrap_or_default() / 1000.0,
         liked: false,

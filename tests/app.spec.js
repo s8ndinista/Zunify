@@ -23,7 +23,7 @@ const boot = async page => {
   await expect(page).toHaveTitle("Zunify · Your music");
 };
 
-function taggedWave(title, album = "Folder album", cover) {
+function taggedWave(title, album = "Folder album", cover, artist = "Folder artist") {
   const chunk = (name, bytes) => {
     const header = Buffer.alloc(8);
     header.write(name);
@@ -55,7 +55,7 @@ function taggedWave(title, album = "Folder album", cover) {
   }
   return chunk("RIFF", Buffer.concat([
     Buffer.from("WAVE"), chunk("fmt ", format), chunk("data", pcm),
-    chunk("LIST", Buffer.concat([Buffer.from("INFO"), field("INAM", title), field("IART", "Folder artist"), field("IPRD", album)])),
+    chunk("LIST", Buffer.concat([Buffer.from("INFO"), field("INAM", title), field("IART", artist), field("IPRD", album)])),
     ...embedded,
   ]));
 }
@@ -88,6 +88,7 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
   await pickerInput.setFiles(folder);
   await expect(button(page, "Folder album")).toBeAttached();
   await press(page, "Folder album");
+  await press(page, "Album details");
   const header = button(page, "Play all");
   await expect(header).toBeAttached();
   await expect(button(page, "Find cover art")).toHaveCount(0);
@@ -102,7 +103,7 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0);
   await expect(page.locator("audio")).toHaveAttribute("src", /^blob:/);
   await press(page, "Back");
-  await expect(button(page, "Choose music folder")).toBeAttached();
+  await expect(button(page, "Music folders")).toBeAttached();
   await page.goForward();
   await expect(button(page, "Play all")).toBeAttached();
   await page.evaluate(() => {
@@ -114,7 +115,7 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
     };
   });
   await page.goBack();
-  await expect(button(page, "Choose music folder")).toBeAttached();
+  await expect(button(page, "Music folders")).toBeAttached();
   expect(await page.evaluate(() => globalThis.ferroBackRequests)).toBe(1);
   await page.route("https://musicbrainz.org/ws/2/release-group?*", route => {
     expect(new URL(route.request().url()).searchParams.get("query")).toContain('releasegroup:"Missing cover"');
@@ -127,15 +128,17 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
     headers: { "access-control-allow-origin": "*" }, path: "wwwroot/icon-192.png", contentType: "image/png",
   }));
   await press(page, "Missing cover");
+  await press(page, "Album details");
   await press(page, "Find cover art");
   await expect(button(page, "Find cover art")).toHaveCount(0);
   await press(page, "Back");
-  await expect(button(page, "Choose music folder")).toBeAttached();
+  await expect(button(page, "Music folders")).toBeAttached();
   await press(page, "Embedded cover");
+  await press(page, "Album details");
   await expect(button(page, "Play Song with cover")).toBeAttached();
   await expect(button(page, "Find cover art")).toHaveCount(0);
   await press(page, "Back");
-  await expect(button(page, "Choose music folder")).toBeAttached();
+  await expect(button(page, "Music folders")).toBeAttached();
   await press(page, "Back");
   await expect(button(page, "Local music")).toBeAttached();
 });
@@ -197,16 +200,20 @@ test("recovers from a file-only picker by importing a dropped folder recursively
   expect(accepted).toBe(true);
   await expect(page.locator("input[webkitdirectory]")).toHaveCount(0);
   await press(page, "Dropped album");
+  await press(page, "Album details");
   await expect(button(page, "Play First nested song")).toBeAttached();
   await expect(button(page, "Play Second nested song")).toBeAttached();
   await boot(page);
   await expect(button(page, "Play First nested song")).toBeAttached();
-  await expect(page.getByText(/Drop your saved folder again/)).toBeAttached();
+  await expect(page.getByText("Drop your music folder here")).toHaveCount(0);
+  await press(page, "Music folders");
+  await expect(page.getByText(/Drop this folder again to reconnect/)).toBeVisible();
 });
 
 test("restores local music before rescanning and keeps its queue, favorites, and playlists", async ({ page }) => {
   await page.addInitScript(() => {
-    window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle("Music");
+    window.showDirectoryPicker = async () => (await navigator.storage.getDirectory())
+      .getDirectoryHandle(window.nextMusicFolder ?? "Music");
     if (sessionStorage.getItem("hold-folder-scan")) {
       const values = FileSystemDirectoryHandle.prototype.values;
       const wait = new Promise(resolve => { window.resumeFolderScan = resolve; });
@@ -274,6 +281,61 @@ test("restores local music before rescanning and keeps its queue, favorites, and
   await press(page, "Your library");
   await press(page, "Liked songs");
   await expect(button(page, "Play First song")).toBeAttached();
+
+  await page.evaluate(async bytes => {
+    const root = await navigator.storage.getDirectory();
+    const folder = await root.getDirectoryHandle("Other Music", { create: true });
+    const track = await folder.getFileHandle("01.wav", { create: true });
+    const stream = await track.createWritable();
+    await stream.write(Uint8Array.from(bytes));
+    await stream.close();
+    window.nextMusicFolder = "Other Music";
+    sessionStorage.removeItem("hold-folder-scan");
+  }, Array.from(taggedWave("Other song", "Other album", undefined, "Other artist")));
+  await press(page, "Your library");
+  await press(page, "Local music");
+  await expect(page.getByText("Drop your music folder here")).toHaveCount(0);
+  await press(page, "Music folders");
+  await page.getByRole("button", { name: "Add music folder" }).click();
+  await expect(page.getByRole("button", { name: "Remove Other Music", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "Close music folder settings" }).click();
+  await press(page, "Collection");
+  await expect(button(page, "Play First song")).toBeAttached();
+  await expect(button(page, "Play Other song")).toBeAttached();
+  await press(page, "Folder artist");
+  await expect(page.getByText("ALBUMS", { exact: true })).toBeAttached();
+  await expect(button(page, "Other album")).toHaveCount(0);
+  await expect(button(page, "Play Other song")).toHaveCount(0);
+  await press(page, "Folder album");
+  await expect(button(page, "Play First song")).toBeAttached();
+  await expect(button(page, "Play Other song")).toHaveCount(0);
+  await expect(button(page, "Album details")).toBeAttached();
+  await press(page, "All artists");
+  await expect(button(page, "Other album")).toBeAttached();
+  await press(page, "Other album");
+  await expect(button(page, "Play Other song")).toBeAttached();
+  await expect(button(page, "Play First song")).toHaveCount(0);
+  await press(page, "All songs");
+  await expect(button(page, "Play First song")).toBeAttached();
+  await page.setViewportSize({ width: 390, height: 780 });
+  await press(page, "Show Artists");
+  await press(page, "Folder artist");
+  await expect(button(page, "Show Albums")).toBeAttached();
+  await expect(button(page, "Folder album")).toBeAttached();
+  await press(page, "Folder album");
+  await expect(button(page, "Play First song")).toBeAttached();
+  await expect(button(page, "Other album")).toHaveCount(0);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await press(page, "Local music");
+  await press(page, "Music folders");
+  await page.getByRole("button", { name: "Remove Music", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Remove Music", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Close music folder settings" }).click();
+  await expect(button(page, "Play First song")).toHaveCount(0);
+  await expect(button(page, "Play Other song")).toBeAttached();
+  await boot(page);
+  await expect(button(page, "Play Other song")).toBeAttached();
+  await expect(button(page, "Play First song")).toHaveCount(0);
 });
 
 test("offline install caches the app without sample audio", async ({ page, context }) => {
@@ -545,7 +607,10 @@ test.describe("mocked Spotify integration", () => {
         await expect(button(page, "Play Library song 76")).toBeAttached();
         await expect(button(page, "Play Library song 75")).toHaveCount(0);
         await expect(button(page, "Library artist 76")).toBeAttached();
-        await expect(button(page, "Library playlist 48")).toBeAttached();
+        await expect(button(page, "Library playlist 48")).toHaveCount(0);
+        await page.mouse.move(110, 450);
+        await page.mouse.wheel(0, -6500);
+        await press(page, "All artists");
 
         await page.setViewportSize({ width: 390, height: 780 });
         await expect(button(page, "Show Playlists")).toBeAttached();

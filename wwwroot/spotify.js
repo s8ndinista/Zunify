@@ -240,6 +240,7 @@ export function itemOf(raw, kind = raw?.type) {
     id: raw.uri, kind: type, title: raw.name ?? "",
     artist: raw.artists?.map(a => a.name).join(", ") || raw.owner?.display_name || raw.publisher || (type === "artist" ? "Artist" : type === "playlist" ? "Playlist" : ""),
     album: raw.album?.name ?? "",
+    album_id: raw.album?.uri ?? (raw.album?.id ? "spotify:album:" + raw.album.id : ""),
     art: (raw.album?.images ?? raw.images)?.find(im => im?.url)?.url ?? "",
     duration: (raw.duration_ms || 0) / 1000,
   };

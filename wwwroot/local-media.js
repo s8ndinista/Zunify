@@ -56,23 +56,22 @@ async function entryFiles(roots) {
 export async function droppedMusicFiles(transfer) {
   // Read the directory entries while the browser is dispatching the drop event.
   const items = Array.from(transfer.items ?? []).filter(item => item.kind === "file");
-  const handles = items.map(async item => {
-    try { return await item.getAsFileSystemHandle?.(); }
-    catch { return null; }
-  });
-  const directories = items.map(item =>
-    (item.getAsEntry ?? item.webkitGetAsEntry)?.call(item)).filter(entry => entry?.isDirectory);
-  const nativeDirectories = (await Promise.all(handles)).filter(handle => handle?.kind === "directory");
-  if (nativeDirectories.length && nativeDirectories.length >= directories.length) {
-    return readMusicFolders(nativeDirectories);
-  }
-  if (!directories.length) throw folderRequired();
-  return { entries: await entryFiles(directories), names: directories.map(entry => entry.name) };
+  const sources = await Promise.all(items.map(async item => {
+    const entry = (item.getAsEntry ?? item.webkitGetAsEntry)?.call(item);
+    let handle;
+    try { handle = await item.getAsFileSystemHandle?.(); }
+    catch { /* Fall back to the folder entry. */ }
+    if (handle?.kind === "directory") return readMusicFolder(handle);
+    if (entry?.isDirectory) return { name: entry.name, entries: await entryFiles([entry]) };
+    return null;
+  }));
+  const folders = sources.filter(Boolean);
+  if (!folders.length) throw folderRequired();
+  return folders;
 }
 
-export async function readMusicFolders(handles) {
-  const entries = (await Promise.all(handles.map(handle => directoryFiles(handle)))).flat();
-  return { entries, handles, names: handles.map(handle => handle.name) };
+export async function readMusicFolder(handle) {
+  return { name: handle.name, handle, entries: await directoryFiles(handle) };
 }
 
 export async function pickMusicFiles(signal) {
@@ -85,7 +84,7 @@ export async function pickMusicFiles(signal) {
       if (error.name !== "SecurityError" && error.name !== "NotSupportedError") throw error;
     }
     if (signal.aborted) return null;
-    if (directory) return readMusicFolders([directory]);
+    if (directory) return [await readMusicFolder(directory)];
   }
   const input = document.createElement("input");
   input.type = "file";
@@ -112,10 +111,16 @@ export async function pickMusicFiles(signal) {
       const directories = Array.from(input.webkitEntries ?? []).filter(entry => entry.isDirectory);
       const files = Array.from(input.files).filter(file => file.webkitRelativePath);
       if (directories.length) {
-        done(entryFiles(directories).then(entries => ({ entries, names: directories.map(entry => entry.name) })));
+        done(Promise.all(directories.map(async entry => ({ name: entry.name, entries: await entryFiles([entry]) }))));
       } else if (files.length) {
-        const entries = files.map(file => ({ file, path: file.webkitRelativePath }));
-        done({ entries, names: [...new Set(entries.map(({ path }) => path.split("/")[0]))] });
+        const folders = new Map();
+        for (const file of files) {
+          const path = file.webkitRelativePath;
+          const name = path.split("/")[0];
+          if (!folders.has(name)) folders.set(name, { name, entries: [] });
+          folders.get(name).entries.push({ file, path });
+        }
+        done([...folders.values()]);
       }
       else { close(); reject(folderRequired()); }
     }, { once: true });
@@ -124,7 +129,7 @@ export async function pickMusicFiles(signal) {
   });
 }
 
-export async function readMusicFiles(entries, version, previous = new Map()) {
+export async function readMusicFiles(entries, version, { id, legacy = false, metadata = new Map() }) {
   const files = new Map(), covers = new Map(), albums = [], tracks = [];
   const metadataCache = new Map();
   const folderCovers = new Map();
@@ -147,7 +152,7 @@ export async function readMusicFiles(entries, version, previous = new Map()) {
     while (index < audio.length) {
       const at = index++;
       const { file, path } = audio[at];
-      let saved = previous.get(path);
+      let saved = metadata.get(path);
       if (saved?.size !== file.size || saved.modified !== file.lastModified) {
         const metadata = await metadataFor(file);
         const tag = metadata?.common ?? {};
@@ -163,11 +168,11 @@ export async function readMusicFiles(entries, version, previous = new Map()) {
       const { album, albumArtist, artist, disc, number, embedded, duration, title } = saved;
       const folder = parent(path);
       const group = JSON.stringify([album.toLowerCase(), albumArtist.toLowerCase(), albumArtist ? "" : folder]);
-      const id = "local:track:" + encodeURIComponent(path);
+      const trackId = "local:track:" + (legacy ? "" : id + ":") + encodeURIComponent(path);
       parsed[at] = {
         file, group, albumArtist, disc, number,
         embedded, folderCover: folderCovers.get(folder)?.file,
-        track: { id, kind: "track", album, artist, title, duration, art: "" },
+        track: { id: trackId, kind: "track", album, artist, title, duration, art: "" },
       };
     }
   }));
@@ -182,6 +187,7 @@ export async function readMusicFiles(entries, version, previous = new Map()) {
     const embedded = group.find(row => row.embedded);
     const folderCover = group.find(row => row.folderCover)?.folderCover;
     const art = embedded || folderCover ? "local-cover:" + version + ":" + groupIndex : "";
+    const albumId = group[0].track.album ? "local:album:" + id + ":" + encodeURIComponent(group[0].group) : "";
     if (embedded) {
       covers.set(art, async () => {
         const picture = front(await metadataFor(embedded.file));
@@ -190,12 +196,13 @@ export async function readMusicFiles(entries, version, previous = new Map()) {
     } else if (folderCover) covers.set(art, async () => folderCover);
     for (const { track, file } of group) {
       track.art = art;
+      track.album_id = albumId;
       files.set(track.id, file);
       tracks.push(track);
     }
     const { track, albumArtist } = group[0];
     if (track.album) {
-      albums.push({ id: "local:album:" + encodeURIComponent(group[0].group), kind: "album", title: track.album, art,
+      albums.push({ id: albumId, kind: "album", title: track.album, art,
         artist: albumArtist || (group.every(row => row.track.artist === track.artist) ? track.artist : ""),
         tracks: group.map(row => row.track) });
     }

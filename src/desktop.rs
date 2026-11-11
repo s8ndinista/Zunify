@@ -253,6 +253,15 @@ impl Desktop {
         if model.page == "local" {
             model.collections.clone_from(&self.files.albums);
         }
+        if model.page == "library" {
+            model.collections.extend(self.files.albums.iter().cloned());
+            let mut seen = HashSet::new();
+            model.collections.extend(self.saved_tracks().iter()
+                .filter(|track| track.album_id.starts_with("spotify:album:") && seen.insert(track.album_id.as_str()))
+                .filter_map(|track| self.known.get(&track.album_id).cloned()));
+            model.items.retain(|item| !item.id.starts_with("local:"));
+            model.items.extend(self.files.tracks.iter().cloned());
+        }
         if model.page == "queue" {
             model.collection_art = self.files.tracks.iter().chain(self.known.values())
                 .filter(|item| !item.art.is_empty()).map(|item| item.art.clone()).collect();
@@ -292,6 +301,18 @@ impl Desktop {
     fn remember(&mut self, items: &[Item]) {
         self.known
             .extend(items.iter().map(|item| (item.id.clone(), item.clone())));
+        for track in items.iter().filter(|track| {
+            track.album_id.starts_with("spotify:album:") && !track.album.is_empty()
+        }) {
+            self.known.entry(track.album_id.clone()).or_insert_with(|| Item {
+                id: track.album_id.clone(),
+                kind: "album".into(),
+                title: track.album.clone(),
+                artist: track.artist.clone(),
+                art: track.art.clone(),
+                ..Item::default()
+            });
+        }
     }
 
     fn remember_local_files(&mut self) {
@@ -914,6 +935,7 @@ impl Desktop {
 
     fn apply_like(&mut self, item: Item, add: bool) {
         if add {
+            self.remember(std::slice::from_ref(&item));
             self.liked.insert(item.id);
         } else {
             self.liked.remove(&item.id);

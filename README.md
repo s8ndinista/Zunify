@@ -55,9 +55,11 @@ Spotify may authorize the built-in player and still deny it the key needed to pl
 
 ## Local music
 
-Open **Collection → Local music**. In the browser, drag your music folder from Finder or your file manager onto **Drop your music folder here**. You can also use **Choose music folder**. Zunify reads tags and covers from the folder and its subfolders. If a browser calls this an upload, it is asking to let Zunify read the files on your device.
+Open **Collection → Local music**. In the browser, drag your music folder from Finder or your file manager onto **Drop your music folder here**, or use **Choose music folder**. Imported tracks and albums appear in **Collection**. After setup, open **Local music → Music folders** to add, rescan, or remove individual folders. Zunify reads tags and covers from each folder and its subfolders. If a browser calls this an upload, it is asking to let Zunify read the files on your device.
 
-The browser restores your track list, likes, local playlists, and local queue between visits. When the browser allows Zunify to keep access to the folder, it checks for additions, edits, and removals in the background. If permission has expired, use **Rescan folder** to grant it again. If your browser only shares files for the current session, drop the folder again to reconnect playback and pick up changes.
+The browser restores your track list, likes, local playlists, and local queue between visits. When the browser retains folder access, Zunify checks for additions, edits, and removals in the background. If permission has expired, use **Rescan** beside that folder to grant it again. If your browser only shares files for the current session, drop the folder into **Music folders** again to reconnect playback and pick up changes.
+
+In **Collection**, select an artist to see their albums, then select an album to see its songs. **All songs** clears the album selection. **Album details** opens the full album and its playback controls.
 
 Use **Find cover art** on an album without a cover to send its title and artist to MusicBrainz and look up a cover in the [Cover Art Archive](https://musicbrainz.org/doc/Cover_Art_Archive). The cover is kept in the current session. The selected audio files and their tags are read on your device, and Zunify leaves the files as they are.
 

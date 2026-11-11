@@ -69,6 +69,7 @@ pub(crate) struct Item {
     pub(crate) title: String,
     pub(crate) artist: String,
     pub(crate) album: String,
+    pub(crate) album_id: String,
     pub(crate) art: String,
     pub(crate) duration: f64,
     pub(crate) kind: String,
@@ -99,11 +100,7 @@ pub(crate) struct Model {
     pub(crate) collections: Vec<Item>,
     pub(crate) collection_art: Vec<String>,
     #[cfg(target_os = "emscripten")]
-    pub(crate) folder_name: String,
-    #[cfg(target_os = "emscripten")]
-    pub(crate) folder_notice: String,
-    #[cfg(target_os = "emscripten")]
-    pub(crate) folder_can_rescan: bool,
+    pub(crate) has_music_folders: bool,
     pub(crate) queue: Vec<Item>,
     pub(crate) liked_music: Vec<Item>,
     pub(crate) recent: Vec<Item>,
@@ -129,6 +126,7 @@ struct Ui {
     body: Option<Ref<Border>>,
     main: Option<Ref<ScrollViewer>>,
     collection: Option<Rc<CollectionView>>,
+    collection_scope: Option<bool>,
     nav: Vec<(&'static str, Ref<TextBlock>)>,
     back: Option<(Ref<Border>, (bool, bool))>,
     footer: Option<Ref<Border>>,
@@ -139,6 +137,7 @@ struct Ui {
     fire: Option<Rc<effects::TransportFire>>,
     account_label: Option<Ref<TextBlock>>,
     artist_filter: Option<String>,
+    album_filter: Option<String>,
     now_stage: Option<WeakRef<Grid>>,
     search: Option<Ref<TextBox>>,
     seek: Option<Ref<Slider>>,
@@ -1376,11 +1375,11 @@ fn collection_cards(items: &[Item], cols: usize) -> Ref<Control> {
     virtual_list(
         items.chunks(cols).map(<[Item]>::to_vec),
         8.0,
-        move |chunk| collection_card_row(chunk, cols),
+        move |chunk| collection_card_row(chunk, cols, false),
     )
 }
 
-fn collection_card_row(chunk: &[Item], cols: usize) -> Ref<Control> {
+fn collection_card_row(chunk: &[Item], cols: usize, browse_albums: bool) -> Ref<Control> {
     let g = grid(&vec!["*"; cols].join(","), "");
     for (idx, item) in chunk.iter().enumerate() {
         let card = surface("Transparent", 0.0, 0.0);
@@ -1403,7 +1402,14 @@ fn collection_card_row(chunk: &[Item], cols: usize) -> Ref<Control> {
         p.children()
             .add(label(&item.artist, 10.5, MUTED).upcast::<Control>());
         let id = item.id.clone();
-        let b = button(&item.title, p.upcast(), false, move || send("open", &id));
+        let browse = browse_albums && item.kind == "album";
+        let b = button(&item.title, p.upcast(), false, move || {
+            if browse {
+                select_collection_album(Some(id.clone()));
+            } else {
+                send("open", &id);
+            }
+        });
         b.set_horizontal_alignment(H::Stretch);
         b.set_horizontal_content_alignment(H::Stretch);
         b.set_padding(Thickness::uniform(8.0));
@@ -1762,7 +1768,7 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         let rows = cards.chunks(cols).map(|chunk| Row::Cards(chunk.to_vec()))
             .chain(tracks.cloned().enumerate().map(|(index, item)| Row::Track(index, item)));
         let list = virtual_list(rows, 2.0, move |row| match row {
-            Row::Cards(items) => collection_card_row(items, cols),
+            Row::Cards(items) => collection_card_row(items, cols, false),
             Row::Track(index, item) => track(item, *index, false),
         });
         let viewer = scroll();
@@ -1793,6 +1799,8 @@ fn bounded_catalog(page: &str) -> bool {
 }
 struct CollectionPane<T> {
     host: Ref<Grid>,
+    header: Ref<Grid>,
+    heading: Ref<TextBlock>,
     viewer: Ref<ScrollViewer>,
     repeater: Ref<ItemsRepeater>,
     items: RefCell<Vec<T>>,
@@ -1808,12 +1816,17 @@ impl<T: Clone + PartialEq + 'static> CollectionPane<T> {
         let repeater = virtual_repeater(spacing, build);
         viewer.set_content(Some(Rc::new(repeater.clone().upcast::<Control>())));
 
-        let host = mount(grid_view("", "Auto,*").children((
-            kicker_view(title, TEXT).margin(Thickness::new(0.0, 0.0, 0.0, 8.0)),
-            viewer.clone(),
-        )));
+        let heading = mount(kicker_view(title, TEXT));
+        let header = mount(
+            grid_view("*,Auto", "")
+                .margin(Thickness::new(0.0, 0.0, 0.0, 8.0))
+                .child(heading.clone()),
+        );
+        let host = mount(grid_view("", "Auto,*").children((header.clone(), viewer.clone())));
         Self {
             host,
+            header,
+            heading,
             viewer,
             repeater,
             items: RefCell::default(),
@@ -1836,14 +1849,13 @@ struct CollectionView {
     songs: CollectionPane<(usize, Item)>,
     playlist_empty: Ref<TextBlock>,
     song_empty: Ref<TextBlock>,
-    tabs: Vec<Ref<TextBlock>>,
+    album_actions: Ref<StackPanel>,
+    tabs: Vec<(Ref<TextBlock>, Ref<Button>)>,
     selected_artist: RefCell<Option<String>>,
     cols: usize,
     local: bool,
     #[cfg(target_os = "emscripten")]
-    folder_status: Option<Ref<TextBlock>>,
-    #[cfg(target_os = "emscripten")]
-    rescan: Option<Ref<Button>>,
+    drop_panel: Option<Ref<Border>>,
 }
 
 impl CollectionView {
@@ -1901,6 +1913,7 @@ impl CollectionView {
             let filters = filters.children((
                 pill("New playlist", "plus", false, "local-playlist", ""),
                 pill("Local queue", "queue", false, "navigate", "local-queue"),
+                pill("Music folders", "library", false, "music-folders", ""),
             ));
             filters
         } else {
@@ -1917,31 +1930,30 @@ impl CollectionView {
         let root = root.child(filters);
 
         #[cfg(target_os = "emscripten")]
-        let (root, folder_status, rescan) = if local {
-            let description = mount(text_view("", 12.0, MUTED).text_wrapping(TextWrapping::Wrap));
-            let rescan = pill("Rescan folder", "library", false, "rescan-folder", "");
-            let panel = surface_view("#F9E8F1", 12.0, 0.0)
-                .grid_row(2)
-                .border_brush(brush("#C23B80"))
-                .border_thickness(Thickness::uniform(1.0))
-                .margin(Thickness::new(0.0, 0.0, 0.0, 10.0))
-                .child(
-                    ui::stack_panel().spacing(5.0).children((
-                        text_view("Drop your music folder here", 17.0, TEXT)
-                            .font_weight(FontWeight::SemiBold),
-                        description.clone(),
-                        ui::wrap_panel()
-                            .item_spacing(4.0)
-                            .line_spacing(4.0)
-                            .children((
-                                pill("Choose music folder", "library", false, "import-folder", ""),
-                                rescan.clone(),
-                            )),
-                    )),
-                );
-            (root.child(panel), Some(description), Some(rescan))
+        let (root, drop_panel) = if local {
+            let panel = mount(
+                surface_view("#F9E8F1", 12.0, 0.0)
+                    .grid_row(2)
+                    .border_brush(brush("#C23B80"))
+                    .border_thickness(Thickness::uniform(1.0))
+                    .margin(Thickness::new(0.0, 0.0, 0.0, 10.0))
+                    .child(
+                        ui::stack_panel().spacing(5.0).children((
+                            text_view("Drop your music folder here", 17.0, TEXT)
+                                .font_weight(FontWeight::SemiBold),
+                            text_view(
+                                "Drag a folder from Finder or your file manager.",
+                                12.0,
+                                MUTED,
+                            )
+                            .text_wrapping(TextWrapping::Wrap),
+                            pill("Choose music folder", "library", false, "import-folder", ""),
+                        )),
+                    ),
+            );
+            (root.child(panel.clone()), Some(panel))
         } else {
-            (root, None, None)
+            (root, None)
         };
 
         let artists = CollectionPane::new("ARTISTS", 1.0, artist_button);
@@ -1954,11 +1966,31 @@ impl CollectionView {
                 "PLAYLISTS"
             },
             8.0,
-            move |chunk: &Vec<Item>| collection_card_row(chunk, cols),
+            move |chunk: &Vec<Item>| collection_card_row(chunk, cols, true),
         );
         let songs = CollectionPane::new("SONGS", 2.0, |(index, item)| track(item, *index, false));
         let playlist_empty = collection_empty(&playlists.host, if local { "Tagged albums appear here." } else { "Your playlists appear here." });
         let song_empty = collection_empty(&songs.host, "No songs to show.");
+        let all = button(
+            "All songs",
+            label("All songs", 11.0, TEXT).upcast(),
+            false,
+            || {
+                select_collection_album(None);
+            },
+        );
+        let details = button(
+            "Album details",
+            label("Album details", 11.0, TEXT).upcast(),
+            false,
+            || {
+                if let Some(id) = UI.with(|ui| ui.borrow().album_filter.clone()) {
+                    send("open", &id);
+                }
+            },
+        );
+        let album_actions = mount(row_view(2.0).children((all, details)));
+        put(&songs.header, 1, 0, album_actions.clone().upcast());
 
         let catalog = grid(if compact { "" } else { "1.05*,2.1*,1.8*" }, "");
         let mut tabs = Vec::new();
@@ -1983,8 +2015,8 @@ impl CollectionView {
                         }
                     },
                 );
-                tab_row.children().add(tab.upcast::<Control>());
-                tabs.push(text);
+                tab_row.children().add(tab.clone().upcast::<Control>());
+                tabs.push((text, tab));
             } else if index > 0 {
                 pane.set_margin(Thickness::new(20.0, 0.0, 0.0, 0.0));
             }
@@ -2019,14 +2051,13 @@ impl CollectionView {
             songs,
             playlist_empty,
             song_empty,
+            album_actions,
             tabs,
             selected_artist: RefCell::default(),
             cols,
             local,
             #[cfg(target_os = "emscripten")]
-            folder_status,
-            #[cfg(target_os = "emscripten")]
-            rescan,
+            drop_panel,
         };
         view.show_pane(if local && m.collections.is_empty() { 2 } else { 1 });
         view
@@ -2034,7 +2065,7 @@ impl CollectionView {
 
     fn show_pane(&self, selected: usize) {
         let panes = [&self.artists.host, &self.playlists.host, &self.songs.host];
-        for (index, (tab, pane)) in self.tabs.iter().zip(panes).enumerate() {
+        for (index, ((tab, _), pane)) in self.tabs.iter().zip(panes).enumerate() {
             tab.set_foreground(Some(brush(if index == selected {
                 "#BA1267"
             } else {
@@ -2046,20 +2077,15 @@ impl CollectionView {
 
     fn update(&self, m: &Model) {
         #[cfg(target_os = "emscripten")]
-        if let (Some(label), Some(rescan)) = (&self.folder_status, &self.rescan) {
-            let text = if m.folder_name.is_empty() {
-                "Drag a folder from Finder or your file manager to import its tracks and subfolders.".to_owned()
-            } else if m.folder_notice.is_empty() {
-                format!("Music folder: {}", m.folder_name)
-            } else {
-                format!("{} · {}", m.folder_name, m.folder_notice)
-            };
-            label.set_text(Some(&text));
-            rescan.set_is_visible(m.folder_can_rescan);
+        if let Some(panel) = &self.drop_panel {
+            panel.set_is_visible(!m.has_music_folders);
         }
         self.status.set_text(Some(&m.status));
         self.status.set_is_visible(!m.status.is_empty());
-        let selected = UI.with(|ui| ui.borrow().artist_filter.clone());
+        let (selected, album_id) = UI.with(|ui| {
+            let ui = ui.borrow();
+            (ui.artist_filter.clone(), ui.album_filter.clone())
+        });
         let tracks = m.items.iter().filter(|item| item.kind == "track");
         let names = tracks
             .clone()
@@ -2071,25 +2097,71 @@ impl CollectionView {
                 .chain(names.into_iter().map(Some))
                 .collect(),
         );
-        self.playlists.update(
-            m.collections
-                .chunks(self.cols)
-                .map(<[Item]>::to_vec)
-                .collect(),
-        );
-        self.playlist_empty.set_is_visible(m.collections.is_empty());
-
+        let artist_albums: std::collections::HashSet<_> = tracks
+            .clone()
+            .filter(|track| {
+                selected
+                    .as_ref()
+                    .is_some_and(|artist| track.artist == *artist)
+            })
+            .map(|track| track.album_id.as_str())
+            .collect();
+        let cards: Vec<_> = m
+            .collections
+            .iter()
+            .filter(|item| {
+                selected.as_ref().is_none_or(|artist| {
+                    item.kind == "album"
+                        && (item.artist == *artist || artist_albums.contains(item.id.as_str()))
+                })
+            })
+            .cloned()
+            .collect();
+        let has_albums = cards.iter().any(|item| item.kind == "album");
+        let has_playlists = cards.iter().any(|item| item.kind == "playlist");
+        let heading = if selected.is_some() || (has_albums && !has_playlists) {
+            "Albums"
+        } else if has_albums || (self.local && cfg!(target_os = "emscripten")) {
+            "Albums & playlists"
+        } else if self.local {
+            "Albums"
+        } else {
+            "Playlists"
+        };
+        let heading_upper = heading.to_ascii_uppercase();
+        self.playlists.heading.set_text(Some(&heading_upper));
+        AutomationProperties::set_name(&self.playlists.viewer, Some(&heading_upper));
+        if let Some((text, tab)) = self.tabs.get(1) {
+            text.set_text(Some(heading));
+            AutomationProperties::set_name(tab, Some(&format!("Show {heading}")));
+        }
+        self.playlist_empty.set_text(Some(if selected.is_some() {
+            "No albums for this artist."
+        } else {
+            "Albums and playlists appear here."
+        }));
+        self.playlist_empty.set_is_visible(cards.is_empty());
+        let album = cards
+            .iter()
+            .find(|item| album_id.as_ref() == Some(&item.id));
+        self.songs
+            .heading
+            .set_text(Some(album.map_or("SONGS", |item| item.title.as_str())));
+        self.album_actions.set_is_visible(album.is_some());
         self.songs.update(
             tracks
-                .filter(|item| {
-                    selected
+                .filter(|item| match album {
+                    Some(album) => item.album_id == album.id,
+                    None => selected
                         .as_ref()
-                        .is_none_or(|artist| item.artist == *artist)
+                        .is_none_or(|artist| item.artist == *artist),
                 })
                 .cloned()
                 .enumerate()
                 .collect(),
         );
+        self.playlists
+            .update(cards.chunks(self.cols).map(<[Item]>::to_vec).collect());
         self.song_empty
             .set_is_visible(self.songs.items.borrow().is_empty());
 
@@ -2097,6 +2169,7 @@ impl CollectionView {
             let previous = self.selected_artist.replace(selected.clone());
             self.mark_artist(&previous, false);
             self.mark_artist(&selected, true);
+            self.playlists.viewer.scroll_to_home();
             self.songs.viewer.scroll_to_home();
         }
     }
@@ -2124,6 +2197,15 @@ fn artist_ink(selected: bool) -> Rc<dyn IBrush> {
     brush(if selected { "#BA1267" } else { TEXT })
 }
 
+fn select_collection_album(album: Option<String>) {
+    UI.with(|ui| ui.borrow_mut().album_filter = album);
+    refresh(true, false, false);
+    if let Some(view) = UI.with(|ui| ui.borrow().collection.clone()) {
+        view.songs.viewer.scroll_to_home();
+        view.show_pane(2);
+    }
+}
+
 fn artist_button(artist: &Option<String>) -> Ref<Control> {
     let name = artist.as_deref().unwrap_or("All artists");
     let selected = UI.with(|ui| ui.borrow().artist_filter == *artist);
@@ -2133,17 +2215,18 @@ fn artist_button(artist: &Option<String>) -> Ref<Control> {
     let button = button(name, text.upcast(), false, move || {
         let changed = UI.with(|ui| {
             let mut ui = ui.borrow_mut();
-            if ui.artist_filter == selection {
+            if ui.artist_filter == selection && ui.album_filter.is_none() {
                 return false;
             }
             ui.artist_filter = selection.clone();
+            ui.album_filter = None;
             true
         });
         if changed {
             refresh(true, false, false);
         }
         if let Some(view) = UI.with(|ui| ui.borrow().collection.clone()) {
-            view.show_pane(2);
+            view.show_pane(1);
         }
     });
     button.set_horizontal_content_alignment(H::Left);
@@ -2713,8 +2796,16 @@ fn refresh(body: bool, playback: bool, animate: bool) {
             UI.with(|ui| ui.borrow_mut().now_stage = None);
             host.set_background(Some(brush(BG)));
             if matches!(m.page.as_str(), "library" | "local") {
-                let existing = UI.with(|ui| ui.borrow().collection.clone())
-                    .filter(|view| view.local == (m.page == "local"));
+                let local = m.page == "local";
+                let existing = UI.with(|ui| {
+                    let mut ui = ui.borrow_mut();
+                    if ui.collection_scope != Some(local) {
+                        ui.collection_scope = Some(local);
+                        ui.artist_filter = None;
+                        ui.album_filter = None;
+                    }
+                    ui.collection.clone().filter(|view| view.local == local)
+                });
                 let view = existing.unwrap_or_else(|| {
                     let view = Rc::new(CollectionView::new(&m, width, animate && !reduced));
                     UI.with(|ui| ui.borrow_mut().collection = Some(view.clone()));
@@ -2804,9 +2895,7 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
         let mut ui = ui.borrow_mut();
         let previous = &ui.model;
         #[cfg(target_os = "emscripten")]
-        let folder_changed = previous.folder_name != model.folder_name
-            || previous.folder_notice != model.folder_notice
-            || previous.folder_can_rescan != model.folder_can_rescan;
+        let folder_changed = previous.has_music_folders != model.has_music_folders;
         #[cfg(not(target_os = "emscripten"))]
         let folder_changed = false;
         let connected_changed = previous.connected != model.connected;
