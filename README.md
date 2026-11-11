@@ -2,7 +2,7 @@
 
 A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together pins, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
 
-FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and keeps a slow glow of its own where it has no way to listen. See [Spectrum](#spectrum). The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
+FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and moves at random where it has no way to listen. See [Spectrum](#spectrum). The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
 
 ## Run the native desktop app
 
@@ -58,7 +58,7 @@ The fire follows the music when the app can hear it. Spotify’s streams are pro
 - **Desktop, Spotify.** While you are signed in, the app records what the computer is playing and analyzes it. Play in the official Spotify app on the same computer. The recording stays in memory and is never stored or sent. macOS 14.6 or later asks once for permission to record system audio. Windows needs no permission. Linux needs a PulseAudio or PipeWire monitor source. The Windows and Linux paths are untested.
 - **Browser, Spotify.** Open **Spotify settings** and choose **Show the spectrum for Spotify**, then share the tab with its audio when the browser asks. This needs a Chromium desktop browser, and the browser asks again on each visit.
 
-When the music goes quiet, the flames fall away. When the app has no way to listen, the fire keeps a slow glow that does not follow the music. That covers a computer whose output cannot be recorded and a browser tab whose audio is not shared. Music on another Spotify Connect device is silence to the app, so the fire stays dark for it.
+When the music goes quiet, the flames fall away. When the app has no way to listen, the fire moves at random and keeps no time with the music. That covers a computer whose output cannot be recorded and a browser tab whose audio is not shared. Music on another Spotify Connect device is silence to the app, so the fire stays dark for it.
 
 ## Verify
 

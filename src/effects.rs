@@ -158,7 +158,7 @@ impl CustomEffect for FireFrame {
 
 /// The fire beneath the transport, shaped by the live spectrum of the audio the app is playing.
 /// Silence lets the flames fall away. Only when the app has no way to listen to the music does the
-/// fire keep a slow glow of its own.
+/// fire move at random, out of time with it.
 pub(crate) struct TransportFire {
     host: WeakRef<Border>,
     reduced_motion: bool,
@@ -167,6 +167,10 @@ pub(crate) struct TransportFire {
     lit: Cell<bool>,
     last_frame: Cell<f64>,
     levels: RefCell<[f64; spectrum::BANDS]>,
+    // The invented spectrum shown when the app cannot listen.
+    targets: RefCell<[f64; spectrum::BANDS]>,
+    next_kick: Cell<f64>,
+    seed: Cell<u32>,
 }
 
 impl TransportFire {
@@ -179,6 +183,9 @@ impl TransportFire {
             lit: Cell::new(false),
             last_frame: Cell::new(f64::NEG_INFINITY),
             levels: RefCell::new([0.0; spectrum::BANDS]),
+            targets: RefCell::new([0.0; spectrum::BANDS]),
+            next_kick: Cell::new(0.0),
+            seed: Cell::new(0x9E37_79B9),
         })
     }
 
@@ -202,27 +209,59 @@ impl TransportFire {
         }
     }
 
-    /// A slow glow that owes nothing to the music, strongest in the middle of the strip.
-    fn ambient(band: usize, now: f64) -> f64 {
-        let x = band as f64;
-        let drift = (now * 0.9 + x * 0.21).sin() * 0.5
-            + (now * 1.7 - x * 0.47).sin() * 0.3
-            + (now * 3.1 + x * 1.3).sin() * 0.2;
-        let reach = 1.0 - 0.55 * x / (spectrum::BANDS - 1) as f64;
-        (0.3 + 0.16 * drift) * reach
+    fn random(&self) -> f64 {
+        // xorshift32
+        let mut x = self.seed.get();
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.seed.set(x);
+        f64::from(x) / f64::from(u32::MAX)
+    }
+
+    /// Invents a restless spectrum for music the app cannot hear. It keeps no beat: kicks land
+    /// in the bass at uneven intervals while the other bands jump about and settle.
+    fn improvise(&self, now: f64) {
+        let mut targets = self.targets.borrow_mut();
+        for target in targets.iter_mut() {
+            *target *= 0.86;
+        }
+        if now >= self.next_kick.get() {
+            self.next_kick.set(now + 0.22 + 0.5 * self.random());
+            let strength = 0.55 + 0.4 * self.random();
+            for (band, target) in targets.iter_mut().take(14).enumerate() {
+                *target = target.max(strength * (1.0 - band as f64 / 20.0));
+            }
+        }
+        // A few bands leap each frame, the quieter treble less often and less far.
+        for _ in 0..5 {
+            let band = (self.random() * self.random() * spectrum::BANDS as f64) as usize;
+            let band = band.min(spectrum::BANDS - 1);
+            let reach = 1.0 - 0.6 * band as f64 / (spectrum::BANDS - 1) as f64;
+            let leap = (0.25 + 0.6 * self.random()) * reach;
+            for (offset, spread) in [(0usize, 1.0), (1, 0.6), (2, 0.3)] {
+                if let Some(target) = targets.get_mut(band + offset) {
+                    *target = target.max(leap * spread);
+                }
+            }
+        }
     }
 
     fn paint(&self, host: &Border, now: f64) {
         let playing = self.playing.get();
         let heard = if playing { spectrum::latest() } else { None };
         let glowing = playing && !spectrum::listening();
+        if glowing {
+            self.improvise(now);
+        }
+        let targets = self.targets.borrow();
         let mut levels = self.levels.borrow_mut();
         for (index, level) in levels.iter_mut().enumerate() {
-            if glowing {
-                *level += (Self::ambient(index, now) - *level) * 0.08;
-                continue;
-            }
-            let target = heard.map_or(0.0, |bands| f64::from(bands[index]));
+            let target = if glowing {
+                targets[index]
+            } else {
+                heard.map_or(0.0, |bands| f64::from(bands[index]))
+            };
             // Flames leap with the music and fall away more slowly.
             *level += (target - *level) * if target > *level { 0.7 } else { 0.2 };
         }
