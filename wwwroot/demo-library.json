@@ -1,0 +1,117 @@
+{
+  "tracks": [
+    {
+      "id": "demo:1",
+      "title": "Midnight Signal",
+      "artist": "Glass Meridian",
+      "album": "After Hours",
+      "art": "art/mix-1.jpg",
+      "duration": 24,
+      "kind": "track",
+      "audio": "audio/sample-1.wav"
+    },
+    {
+      "id": "demo:2",
+      "title": "Soft Horizons",
+      "artist": "Luma Field",
+      "album": "Dusk Drive",
+      "art": "art/mix-2.jpg",
+      "duration": 26,
+      "kind": "track",
+      "audio": "audio/sample-2.wav"
+    },
+    {
+      "id": "demo:3",
+      "title": "Blue Hour",
+      "artist": "North of Violet",
+      "album": "Weightless",
+      "art": "art/mix-3.jpg",
+      "duration": 22,
+      "kind": "track",
+      "audio": "audio/sample-3.wav"
+    },
+    {
+      "id": "demo:4",
+      "title": "A Place Between",
+      "artist": "Tidal Archive",
+      "album": "Deep Focus",
+      "art": "art/mix-4.jpg",
+      "duration": 27,
+      "kind": "track",
+      "audio": "audio/sample-4.wav"
+    },
+    {
+      "id": "demo:5",
+      "title": "Low Orbit",
+      "artist": "Glass Meridian",
+      "album": "After Hours",
+      "art": "art/mix-1.jpg",
+      "duration": 25,
+      "kind": "track",
+      "audio": "audio/sample-5.wav"
+    },
+    {
+      "id": "demo:6",
+      "title": "Last Light",
+      "artist": "Luma Field",
+      "album": "Dusk Drive",
+      "art": "art/mix-2.jpg",
+      "duration": 24,
+      "kind": "track",
+      "audio": "audio/sample-6.wav"
+    }
+  ],
+  "mixes": [
+    {
+      "id": "mix:1",
+      "title": "After Hours",
+      "artist": "Late-night electronic",
+      "art": "art/mix-1.jpg",
+      "kind": "playlist",
+      "tracks": [
+        "demo:1",
+        "demo:5",
+        "demo:3",
+        "demo:4"
+      ]
+    },
+    {
+      "id": "mix:2",
+      "title": "Dusk Drive",
+      "artist": "Warm and unhurried",
+      "art": "art/mix-2.jpg",
+      "kind": "playlist",
+      "tracks": [
+        "demo:2",
+        "demo:6",
+        "demo:1",
+        "demo:4"
+      ]
+    },
+    {
+      "id": "mix:3",
+      "title": "Weightless",
+      "artist": "Ambient textures",
+      "art": "art/mix-3.jpg",
+      "kind": "playlist",
+      "tracks": [
+        "demo:3",
+        "demo:4",
+        "demo:5"
+      ]
+    },
+    {
+      "id": "mix:4",
+      "title": "Deep Focus",
+      "artist": "Instrumental flow",
+      "art": "art/mix-4.jpg",
+      "kind": "playlist",
+      "tracks": [
+        "demo:4",
+        "demo:3",
+        "demo:2",
+        "demo:5"
+      ]
+    }
+  ]
+}

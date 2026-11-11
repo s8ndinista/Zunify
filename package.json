@@ -1,0 +1,16 @@
+{
+  "name": "spotife",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "configure:browser": "node scripts/configure-browser.mjs && node scripts/precache.mjs",
+    "preview": "node scripts/serve.mjs",
+    "desktop": "cargo run --locked",
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

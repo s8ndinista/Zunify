@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+  <meta name="theme-color" content="#0d1013">
+  <meta name="description" content="SpotiFe on FerroUI. Browse your library, queue tracks, and listen on this device or with Spotify Connect.">
+  <title>SpotiFe · Your music</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="icon" href="./icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./host.css">
+</head>
+<body>
+  <main id="out" aria-label="SpotiFe"></main>
+  <audio preload="none"></audio>
+  <div id="splash" role="status">
+    <img src="./icon.svg" width="54" height="54" alt="">
+    <h1>SpotiFe</h1>
+    <p id="loading-message">Opening your library…</p>
+  </div>
+  <div class="visually-hidden" role="status" id="announcement"></div>
+  <dialog id="settings" aria-labelledby="settings-title">
+    <form method="dialog" class="close-form"><button aria-label="Close settings" class="close">×</button></form>
+    <img src="./icon.svg" width="42" height="42" alt="">
+    <h2 id="settings-title">Spotify account</h2>
+    <form id="signin">
+      <div id="developer-setup">
+        <p>Create an app in the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer">Spotify dashboard</a> with Web API and Web Playback SDK enabled. Register the redirect URL below.</p>
+        <input id="redirect-uri" aria-label="Redirect URL" readonly onclick="this.select()">
+        <label for="client-id">Client ID</label>
+        <input id="client-id" autocomplete="off" spellcheck="false" maxlength="32" required>
+      </div>
+      <button class="primary" type="submit">Sign in with Spotify</button>
+      <p class="fine">Spotify Premium is required for playback. You can close this window to keep exploring the demo.</p>
+    </form>
+    <section id="connected" hidden>
+      <p>Use this app as a Spotify Connect device, or choose another device from the player.</p>
+      <div class="actions"><button type="button" id="enable-playback" class="primary">Play on this device</button><button type="button" id="disconnect">Sign out</button></div>
+    </section>
+    <p id="settings-status" role="status"></p>
+  </dialog>
+  <noscript><p class="noscript">Enable JavaScript to run SpotiFe.</p></noscript>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>

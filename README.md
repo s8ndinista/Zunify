@@ -1,0 +1,61 @@
+# SpotiFe
+
+A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast). The interface is rendered by FerroUI and its WinUI theme, with pointer-tracked Reveal lighting on cards and tracks, composited shadows, and animated page entrances. The app opens to a demo library with original covers and six playable samples. No Spotify account is needed to try it.
+
+## Run the native desktop app
+
+```sh
+git submodule update --init --recursive
+cargo run --locked
+```
+
+FerroUI opens a native window and the demo plays through the system audio output. On macOS, run `scripts/bundle-macos.sh` to build a local [SpotiFe.app](dist-desktop/SpotiFe.app) bundle that opens from Finder. On Linux, install the ALSA development headers required by the audio backend.
+
+## Run in the browser
+
+The [hosted browser build](https://s8ndinista.github.io/Zunify/) is published from the `gh-pages` branch. To publish a new build, replace that branch’s site files with the contents of `dist/`, including `.nojekyll`.
+
+With Git, Node.js 22+, Python 3.10+, and Rustup installed:
+
+```sh
+git submodule update --init --recursive
+vendor/FerroUI/scripts/browser/setup.sh "$PWD/.tools"
+npm run build
+npm run preview
+```
+
+Open [http://127.0.0.1:4173/](http://127.0.0.1:4173/). The setup script provisions the Emscripten, Rust, and wasm-bindgen versions required by the FerroUI pin. If you already have those versions, source that toolchain's environment before running the build. The local preview only binds to the loopback address. To host it for others, serve `dist/` over HTTPS with `.wasm` served as `application/wasm`. A subdirectory works; no server-side Spotify credentials or proxy are needed.
+
+You can also install the browser build from Chrome or Edge’s app menu. It caches the demo for offline use.
+
+## Configure Spotify for listeners
+
+The app publisher registers one Spotify developer app. Listeners click **Connect Spotify**, sign in on Spotify, and approve access. They use their regular Spotify accounts.
+
+1. In Spotify’s developer dashboard, create an app and enable **Web API**. Enable **Web Playback SDK** for browser playback. The registered app name appears on the consent screen. Spotify’s naming policy cautions against names beginning with “Spot”, so check the release name before distributing a Spotify-connected build. [Spotify app registration](https://developer.spotify.com/documentation/web-api/concepts/apps) · [Spotify naming policy](https://developer.spotify.com/policy)
+2. Add each redirect URL to the same Spotify app and use the same Client ID for both builds. The native callback is `http://127.0.0.1:4176/spotify/callback`. The local browser preview uses `http://127.0.0.1:4173/`. The hosted callback is `https://s8ndinista.github.io/Zunify/`. Register the exact URLs, including the repository path and trailing slash for the hosted build. [Spotify redirect URI rules](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri)
+3. The native build includes the shared public Client ID. Supply `SPOTIFY_CLIENT_ID` to use a different registration or configure the browser build. SpotiFe uses OAuth with PKCE and keeps tokens in the running session. Keep the Client Secret out of the build. [Spotify PKCE flow](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
+
+```sh
+export SPOTIFY_CLIENT_ID="YOUR_PUBLIC_CLIENT_ID"
+npm run build
+scripts/bundle-macos.sh
+```
+
+To configure an existing browser build, run `npm run configure:browser` with `SPOTIFY_CLIENT_ID` set, then serve the updated `dist/`. The native app also accepts the environment variable at launch. Set `SPOTIFY_CLIENT_ID` to an empty string at launch to use the native manual setup form.
+
+Spotify Development Mode supports up to five allowlisted accounts on a standard app. The publisher adds testers in the dashboard. Public access requires Spotify’s approval for Extended Quota Mode. Spotify Premium is required for playback. [Spotify quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) · [Spotify Web Playback SDK](https://developer.spotify.com/documentation/web-playback-sdk)
+
+The native app opens the default browser for authorization and receives the callback locally. It controls playback through Spotify Connect. To listen on the same computer, open the official Spotify desktop app and select it under **Devices**. The browser build can play directly through the Web Playback SDK.
+
+## Verify
+
+```sh
+npm ci
+npx playwright install chromium
+npm test
+```
+
+The tests run against the built `dist/`. They cover demo playback, library and queue interaction, search, mobile layout, offline caching, and the Spotify sign-in and player request flow against mocked Spotify endpoints. Live Spotify playback requires the account and app configuration above.
+
+FerroUI is pinned as a Git submodule tracking `main`. See [NOTICE.md](NOTICE.md) for the upstream revisions.
