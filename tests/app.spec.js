@@ -620,7 +620,7 @@ test.describe("mocked Spotify integration", () => {
         await page.mouse.wheel(0, 6500);
         await expect(button(page, "Library playlist 48")).toBeAttached();
         await press(page, "Show Songs");
-        await expect(button(page, "Play Library song 76")).toBeAttached();
+        await expect(button(page, "Play Library song 1")).toBeAttached();
         await expect(button(page, "Library playlist 48")).toHaveCount(0);
         await press(page, "Show Playlists");
         await expect(button(page, "Library playlist 48")).toBeAttached();
