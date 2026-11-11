@@ -1,5 +1,6 @@
 use crate::{
     app::{self, Item, Model},
+    spectrum,
     audio::Audio,
     listen::Listener,
     spotify::{self, Http, Session, item, query, split_uri, str_field},
@@ -268,6 +269,7 @@ impl Desktop {
         self.model.shuffle = false;
         self.position = 0.0;
         self.listener = None;
+        spectrum::set_listening(true);
         self.audio = None;
         self.history.clear();
         self.selected_device.clear();
@@ -1027,6 +1029,7 @@ impl Desktop {
                 self.audio = None;
                 // Without the capture the fire falls back to its ambient glow.
                 self.listener = Listener::start().ok();
+                spectrum::set_listening(self.listener.is_some());
                 self.navigate("home", "");
                 self.api(None, false, false, |session| {
                     let playlists = session.items("/me/playlists?limit=50", None);

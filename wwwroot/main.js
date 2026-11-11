@@ -55,7 +55,8 @@ const pump = () => {
   requestAnimationFrame(function frame() {
     const heard = !playing ? null : !spotify.connected ? sound.samples()
       : sound.capturing ? sound.samples(true, 100 / Math.max(10, volume)) : null;
-    runtime.spectrum(heard ?? silence, sound.rate);
+    // Spotify is out of earshot until the listener shares the tab's audio.
+    runtime.spectrum(heard ?? silence, sound.rate, !spotify.connected || sound.capturing);
     if (playing) requestAnimationFrame(frame); else pumping = false;
   });
 };
@@ -271,9 +272,20 @@ async function toggle() {
   }
   resumeCapture();
   if (!current.id && items.length) return play(items.find(x => x.kind === "track")?.id || library[0]?.id);
-  if (!playing && spotify.active && spotify.active === spotify.device) await spotify.player?.activateElement();
-  await control(playing ? "pause" : "play");
-  playing = !playing; updatedAt = performance.now(); render(false, true);
+  const nextPlaying = !playing;
+  const version = connectionVersion;
+  const track = current.id;
+  if (nextPlaying && spotify.active && spotify.active === spotify.device) await spotify.player?.activateElement();
+  await control(nextPlaying ? "play" : "pause");
+  // The SDK may already have reported the new state while the request was in flight.
+  if (version !== connectionVersion || track !== current.id || playing === nextPlaying) return;
+  const now = performance.now();
+  if (!nextPlaying && updatedAt) {
+    position = Math.min(current.duration || 0, position + (now - updatedAt) / 1000);
+  }
+  playing = nextPlaying;
+  updatedAt = now;
+  render(false, true);
 }
 async function nextTrack(previous = false, ended = false) {
   if (spotify.connected) {
@@ -599,6 +611,9 @@ try {
   runtime = instance;
   FerroExports.attach(runtime);
   runtime.runMain(JSON.stringify(model()), innerWidth, matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const clearReveal = () => runtime.clearReveal?.();
+  document.querySelector("#out").addEventListener("pointerleave", clearReveal);
+  addEventListener("blur", clearReveal);
   document.querySelector("#splash").remove();
   let size;
   addEventListener("resize", () => { cancelAnimationFrame(size); size = requestAnimationFrame(() => runtime.resize(innerWidth)); });

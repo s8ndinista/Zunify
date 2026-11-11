@@ -4,7 +4,10 @@
 //! build taps the samples on their way into the mixer; the browser build pushes the samples of
 //! its Web Audio analyser. Either way the transport fire reads the same 64 bands from here.
 
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 pub(crate) const BANDS: usize = 64;
 const WINDOW: usize = 2048;
@@ -202,6 +205,18 @@ mod live {
 pub(crate) use live::feed;
 #[cfg(target_os = "emscripten")]
 pub(crate) use live::push;
+
+static LISTENING: AtomicBool = AtomicBool::new(true);
+
+/// Records whether the app has any way to hear the music that is playing. It has none for
+/// Spotify when the computer's output or the browser tab cannot be captured.
+pub(crate) fn set_listening(listening: bool) {
+    LISTENING.store(listening, Ordering::Relaxed);
+}
+
+pub(crate) fn listening() -> bool {
+    LISTENING.load(Ordering::Relaxed)
+}
 
 /// The spectrum of the audio that is audible right now, if the app can hear any.
 pub(crate) fn latest() -> Option<[f32; BANDS]> {

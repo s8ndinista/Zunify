@@ -127,7 +127,7 @@ test.describe("mocked Spotify integration", () => {
         contentType: "application/javascript",
         body: `window.Spotify={Player:class {
           listeners={}; addListener(n,cb){this.listeners[n]=cb;}
-          connect(){queueMicrotask(()=>this.listeners.ready({device_id:"web-spotife"}));return Promise.resolve(true);}
+          connect(){window.mockSpotifyPlayer=this;queueMicrotask(()=>this.listeners.ready({device_id:"web-spotife"}));return Promise.resolve(true);}
           disconnect(){}
           // Stands in for the protected stream: a tone the page's own audio graph never sees.
           activateElement(){
@@ -162,6 +162,16 @@ test.describe("mocked Spotify integration", () => {
           });
           if (url.pathname === "/v1/me/tracks") return Response.json({ items: saved });
           if (url.pathname === "/v1/me/playlists") return Response.json({ items: playlists });
+          if (url.pathname === "/v1/me/player/pause") {
+            if (largeLibrary) {
+              window.mockSpotifyPlayer.listeners.player_state_changed({
+                track_window: { current_track: raw }, paused: true, position: 1200,
+              });
+            }
+            return new Response("spotifyPlaybackAcknowledgement", {
+              headers: { "Content-Type": "text/plain" },
+            });
+          }
           return new Response(null, { status: 204 });
         };
       }, { raw, largeLibrary: mode === "shared" });
@@ -187,6 +197,18 @@ test.describe("mocked Spotify integration", () => {
         params: { device_id: "web-spotife" }, body: { uris: ["spotify:track:test"] },
         authorization: "Bearer test-token",
       });
+      await press(page, "Pause");
+      await expect.poll(() => request("/v1/me/player/pause")).toMatchObject({
+        method: "PUT", params: { device_id: "web-spotife" },
+      });
+      await expect(button(page, "Play")).toBeAttached();
+      await expect(page.locator("#announcement")).toHaveText("");
+      await press(page, "Play");
+      await expect.poll(() => page.evaluate(() => window.spotifyRequests
+        .filter(r => r.path === "/v1/me/player/play").map(r => r.body))).toEqual([
+        { uris: ["spotify:track:test"] }, null,
+      ]);
+      await expect(button(page, "Pause")).toBeAttached();
       await press(page, "Like current track");
       await expect.poll(() => request("/v1/me/library")).toMatchObject({
         method: "DELETE", params: { uris: "spotify:track:test" },
@@ -205,6 +227,14 @@ test.describe("mocked Spotify integration", () => {
         await expect(page.locator("#spectrum-toggle")).toHaveText("Show the spectrum for Spotify");
       }
       if (mode === "shared") {
+        const songs = page.getByRole("region", { name: "SONGS", exact: true });
+        const songBar = songs.getByRole("scrollbar");
+        const duration = songs.getByText("1:40", { exact: true }).first();
+        await expect.poll(async () => {
+          const [bar, time] = await Promise.all([songBar.boundingBox(), duration.boundingBox()]);
+          return bar && time ? bar.x - (time.x + time.width) : 0;
+        }).toBeGreaterThanOrEqual(6);
+
         const panes = [
           { x: 110, first: "Library artist 01", last: "Library artist 76" },
           { x: 500, first: "Library playlist 1", last: "Library playlist 48" },
@@ -215,8 +245,19 @@ test.describe("mocked Spotify integration", () => {
           await expect(button(page, last)).toHaveCount(0);
         }
         for (const [index, { x, last }] of panes.entries()) {
-          await page.mouse.move(x, 450);
-          await page.mouse.wheel(0, 6500);
+          if (index === 2) {
+            const thumb = songBar.locator('[data-ferroui-name="VerticalThumb"]');
+            await expect(thumb).toBeAttached();
+            const [track, handle] = await Promise.all([songBar.boundingBox(), thumb.boundingBox()]);
+            const centerX = handle.x + handle.width / 2;
+            await page.mouse.move(centerX, handle.y + handle.height / 2);
+            await page.mouse.down();
+            await page.mouse.move(centerX, track.y + track.height - 1, { steps: 8 });
+            await page.mouse.up();
+          } else {
+            await page.mouse.move(x, 450);
+            await page.mouse.wheel(0, 6500);
+          }
           await expect(button(page, last)).toBeAttached();
           for (const [otherIndex, other] of panes.entries()) {
             if (otherIndex > index) {

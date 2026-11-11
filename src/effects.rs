@@ -48,7 +48,7 @@ pub(crate) fn light(host: &Border) {
     host.set_effect(Some(ImmutableCustomEffect::new(AmbientLight).into()));
 }
 
-pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) {
+pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) -> WeakRef<Border> {
     const WIDTH: f64 = 350.0;
     const HEIGHT: f64 = 300.0;
     let glow = Border::new();
@@ -105,6 +105,7 @@ pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) {
             glow.set_opacity(0.0);
         }
     });
+    glow.downgrade()
 }
 
 // FerroUI transports each Rect as a float4 with no colour conversion.
@@ -156,7 +157,8 @@ impl CustomEffect for FireFrame {
 }
 
 /// The fire beneath the transport, shaped by the live spectrum of the audio the app is playing.
-/// When music plays that the app cannot hear, the fire settles into a slow glow of its own.
+/// Silence lets the flames fall away. Only when the app has no way to listen to the music does the
+/// fire keep a slow glow of its own.
 pub(crate) struct TransportFire {
     host: WeakRef<Border>,
     reduced_motion: bool,
@@ -164,8 +166,6 @@ pub(crate) struct TransportFire {
     queued: Cell<bool>,
     lit: Cell<bool>,
     last_frame: Cell<f64>,
-    // When the analyser last heard anything, on the animation clock.
-    heard_at: Cell<f64>,
     levels: RefCell<[f64; spectrum::BANDS]>,
 }
 
@@ -178,7 +178,6 @@ impl TransportFire {
             queued: Cell::new(false),
             lit: Cell::new(false),
             last_frame: Cell::new(f64::NEG_INFINITY),
-            heard_at: Cell::new(f64::NAN),
             levels: RefCell::new([0.0; spectrum::BANDS]),
         })
     }
@@ -190,12 +189,9 @@ impl TransportFire {
         }
         if active {
             self.last_frame.set(f64::NEG_INFINITY);
-            self.heard_at.set(f64::NAN);
             self.schedule();
-        } else {
-            self.levels.borrow_mut().fill(0.0);
-            self.clear();
         }
+        // When the music stops, the frames keep coming until the flames have died down.
     }
 
     fn clear(&self) {
@@ -217,25 +213,18 @@ impl TransportFire {
     }
 
     fn paint(&self, host: &Border, now: f64) {
-        // How long real silence may last before the fire stops waiting for the music.
-        const PATIENCE: f64 = 2.0;
-        let heard = spectrum::latest();
-        if self.heard_at.get().is_nan()
-            || heard.is_some_and(|bands| bands.iter().any(|level| *level > 0.02))
-        {
-            self.heard_at.set(now);
-        }
-        // Music on another device, or audio the app may not capture, never reaches the analyser.
-        let unheard = now - self.heard_at.get() > PATIENCE;
+        let playing = self.playing.get();
+        let heard = if playing { spectrum::latest() } else { None };
+        let glowing = playing && !spectrum::listening();
         let mut levels = self.levels.borrow_mut();
         for (index, level) in levels.iter_mut().enumerate() {
-            if unheard {
+            if glowing {
                 *level += (Self::ambient(index, now) - *level) * 0.08;
                 continue;
             }
             let target = heard.map_or(0.0, |bands| f64::from(bands[index]));
-            // Flames leap with the music and settle more slowly.
-            *level += (target - *level) * if target > *level { 0.7 } else { 0.28 };
+            // Flames leap with the music and fall away more slowly.
+            *level += (target - *level) * if target > *level { 0.7 } else { 0.2 };
         }
         if levels.iter().all(|level| *level < 0.004) {
             drop(levels);
@@ -272,7 +261,7 @@ impl TransportFire {
         top.request_animation_frame(move |time| {
             let Some(fire) = fire.upgrade() else { return };
             fire.queued.set(false);
-            if !fire.playing.get() {
+            if !fire.playing.get() && !fire.lit.get() {
                 return;
             }
             let Some(host) = fire.host.upgrade() else {
