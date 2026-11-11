@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <meta name="theme-color" content="#130e15">
-  <meta name="app-revision" content="d3019ed0444a378b">
+  <meta name="app-revision" content="518943dafc58ebfc">
   <meta name="description" content="Zunify on FerroUI. Browse your library, queue tracks, and listen on this device or with Spotify Connect.">
   <title>Zunify · Your music</title>
   <link rel="manifest" href="./manifest.webmanifest">
@@ -30,6 +30,7 @@
     <form method="dialog" class="close-form"><button aria-label="Close settings" class="close">×</button></form>
     <img src="./icon.svg" width="42" height="42" alt="">
     <h2 id="settings-title">Spotify account</h2>
+    <button id="open-music-folders" type="button">Music folder settings</button>
     <form id="signin">
       <div id="developer-setup">
         <p>Create an app in the <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener noreferrer">Spotify dashboard</a> with Web API and Web Playback SDK enabled. Register the redirect URL below.</p>
@@ -49,6 +50,14 @@
       </div>
     </section>
     <p id="settings-status" role="status"></p>
+  </dialog>
+  <dialog id="music-folder-settings" aria-labelledby="music-folder-title">
+    <form method="dialog" class="close-form"><button aria-label="Close music folder settings" class="close">×</button></form>
+    <h2 id="music-folder-title">Music folders</h2>
+    <p>Add a folder with the picker or drop it here.</p>
+    <ul id="music-folder-list"></ul>
+    <button id="add-music-folder" class="primary" type="button">Add music folder</button>
+    <p id="music-folder-status" role="status"></p>
   </dialog>
   <dialog id="local-playlist" aria-labelledby="playlist-title">
     <h2 id="playlist-title">New playlist</h2>
