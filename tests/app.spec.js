@@ -11,6 +11,9 @@ const press = async (page, name, n = 0) => {
   // Let FerroUI publish its updated accessibility tree before invoking another control.
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 };
+// A strip of the transport fire that no control overlaps. It is static until music lights it.
+const fire = page => page.screenshot({ clip: { x: 160, y: 880, width: 360, height: 20 } });
+const lit = (page, dark) => async () => !(await fire(page)).equals(dark);
 const boot = async page => {
   await page.goto("./", { waitUntil: "domcontentloaded" });
   await expect(page.locator("#splash")).toHaveCount(0, { timeout: 45_000 });
@@ -22,11 +25,16 @@ test("plays a bundled mix and supports queueing, liking and mobile layout", asyn
   page.on("pageerror", error => errors.push(error.message));
   await boot(page);
   await expect(button(page, "Play mix")).toBeAttached();
+  await page.mouse.move(412, 350);
+  const dark = await fire(page);
   await page.mouse.click(412, 350);
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0.05);
+  // The spectrum is analyzed from the audio as it plays, ahead of the volume control.
+  await expect.poll(lit(page, dark)).toBe(true);
   await press(page, "Pause");
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.paused)).toBe(true);
   await expect(button(page, "Play")).toBeAttached();
+  await expect.poll(lit(page, dark)).toBe(false);
   await press(page, "Next track");
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-5/);
   await press(page, "Like current track");
@@ -120,7 +128,13 @@ test.describe("mocked Spotify integration", () => {
         body: `window.Spotify={Player:class {
           listeners={}; addListener(n,cb){this.listeners[n]=cb;}
           connect(){queueMicrotask(()=>this.listeners.ready({device_id:"web-spotife"}));return Promise.resolve(true);}
-          disconnect(){} activateElement(){return Promise.resolve();}
+          disconnect(){}
+          // Stands in for the protected stream: a tone the page's own audio graph never sees.
+          activateElement(){
+            if(!this.tone){this.tone=new AudioContext();const o=this.tone.createOscillator();
+              o.frequency.value=220;const g=this.tone.createGain();g.gain.value=0.08;o.connect(g).connect(this.tone.destination);o.start();}
+            return this.tone.resume();
+          }
         }}; window.onSpotifyWebPlaybackSDKReady();`,
       }));
       await page.addInitScript(({ raw, largeLibrary }) => {
@@ -165,6 +179,8 @@ test.describe("mocked Spotify integration", () => {
       await expect.poll(() => page.evaluate(() => window.spotifyRequests.map(r => r.path))).toContain("/v1/me/tracks");
       if (mode === "shared") await press(page, "Your library");
       await expect(button(page, "Play Test Song")).toBeAttached();
+      await page.mouse.move(720, 450);
+      const dark = await fire(page);
       await press(page, "Play Test Song");
       const request = path => page.evaluate(path => window.spotifyRequests.find(r => r.path === path), path);
       await expect.poll(() => request("/v1/me/player/play")).toMatchObject({
@@ -175,6 +191,19 @@ test.describe("mocked Spotify integration", () => {
       await expect.poll(() => request("/v1/me/library")).toMatchObject({
         method: "DELETE", params: { uris: "spotify:track:test" },
       });
+      if (mode === "manual") {
+        // The page cannot hear Spotify's audio, so the fire settles into its own glow.
+        await page.mouse.move(720, 450);
+        await expect.poll(lit(page, dark)).toBe(true);
+        // Sharing the tab's audio lets the spectrum follow the music instead.
+        await press(page, "Account");
+        await page.locator("#spectrum-toggle").click();
+        await expect(page.locator("#settings-status")).toHaveText(/spectrum now follows/);
+        await expect(page.locator("#spectrum-toggle")).toHaveText("Stop sharing tab audio");
+        await page.locator("#settings .close").click();
+        await page.locator("#spectrum-toggle").evaluate(button => button.click());
+        await expect(page.locator("#spectrum-toggle")).toHaveText("Show the spectrum for Spotify");
+      }
       if (mode === "shared") {
         const panes = [
           { x: 110, first: "Library artist 01", last: "Library artist 76" },

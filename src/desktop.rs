@@ -1,5 +1,7 @@
 use crate::{
     app::{self, Item, Model},
+    audio::Audio,
+    listen::Listener,
     spotify::{self, Http, Session, item, query, split_uri, str_field},
 };
 use ferroui_base::{
@@ -7,13 +9,11 @@ use ferroui_base::{
     threading::{DispatcherPriority, DispatcherTimer},
 };
 use ferroui_controls::Window;
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
-    io::Cursor,
     path::PathBuf,
     sync::{
         Arc,
@@ -47,37 +47,12 @@ struct Mix {
     tracks: Vec<String>,
 }
 
-struct Audio {
-    // The output must outlive the sink.
-    sink: Sink,
-    _output: OutputStream,
-}
-
-impl Audio {
-    fn new() -> spotify::Result<Self> {
-        let output = OutputStreamBuilder::open_default_stream()
-            .map_err(|error| format!("Could not open audio output: {error}"))?;
-        Ok(Self {
-            sink: Sink::connect_new(output.mixer()),
-            _output: output,
-        })
-    }
-
-    fn play(&mut self, id: &str, volume: f64) -> spotify::Result<()> {
-        let bytes = id
-            .strip_prefix("demo:")
-            .and_then(|number| number.parse::<usize>().ok())
-            .and_then(|index| index.checked_sub(1))
-            .and_then(|index| TRACK_AUDIO.get(index))
-            .ok_or("This demo track is unavailable.")?;
-        let source = Decoder::try_from(Cursor::new(*bytes))
-            .map_err(|error| format!("Could not read demo audio: {error}"))?;
-        self.sink.clear();
-        self.sink.set_volume((volume / 100.0) as f32);
-        self.sink.append(source);
-        self.sink.play();
-        Ok(())
-    }
+fn demo_audio(id: &str) -> spotify::Result<&'static [u8]> {
+    id.strip_prefix("demo:")
+        .and_then(|number| number.parse::<usize>().ok())
+        .and_then(|index| index.checked_sub(1))
+        .and_then(|index| TRACK_AUDIO.get(index).copied())
+        .ok_or_else(|| "This demo track is unavailable.".into())
 }
 
 enum Update {
@@ -185,6 +160,8 @@ struct Desktop {
     upcoming: VecDeque<Item>,
     order: Vec<Item>,
     audio: Option<Audio>,
+    // Hears Spotify playing on this computer, which the app itself cannot decode.
+    listener: Option<Listener>,
     network: Network,
     requested_art: HashSet<String>,
     selected_device: String,
@@ -235,6 +212,7 @@ impl Desktop {
             upcoming: VecDeque::new(),
             order: Vec::new(),
             audio: None,
+            listener: None,
             network: Network::new(),
             requested_art: HashSet::new(),
             selected_device: String::new(),
@@ -289,6 +267,7 @@ impl Desktop {
         self.model.repeat = false;
         self.model.shuffle = false;
         self.position = 0.0;
+        self.listener = None;
         self.audio = None;
         self.history.clear();
         self.selected_device.clear();
@@ -584,13 +563,14 @@ impl Desktop {
     }
 
     fn local_play(&mut self, item: Item) -> spotify::Result<()> {
+        let bytes = demo_audio(&item.id)?;
         if self.audio.is_none() {
             self.audio = Some(Audio::new()?);
         }
         self.audio
-            .as_mut()
+            .as_ref()
             .unwrap()
-            .play(&item.id, self.model.volume)?;
+            .play(bytes, self.model.volume)?;
         self.position = 0.0;
         self.model.playing = true;
         item.record_in(&mut self.model.recent);
@@ -1042,9 +1022,11 @@ impl Desktop {
                 self.model.queue.clear();
                 self.model.playing = false;
                 self.position = 0.0;
-                self.audio = None;
                 self.known.clear();
                 self.liked.clear();
+                self.audio = None;
+                // Without the capture the fire falls back to its ambient glow.
+                self.listener = Listener::start().ok();
                 self.navigate("home", "");
                 self.api(None, false, false, |session| {
                     let playlists = session.items("/me/playlists?limit=50", None);
@@ -1414,6 +1396,7 @@ pub fn window_ready(window: &Ref<Window>) {
                 if let Some(cancel) = state.sign_in.take() {
                     cancel.store(true, Ordering::Relaxed);
                 }
+                state.listener = None;
                 state.audio = None;
             });
         })

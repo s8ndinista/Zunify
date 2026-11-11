@@ -1909,7 +1909,6 @@ fn refresh(body: bool, playback: bool, animate: bool) {
             LIGHT_PAGE.set(false);
         }
         if let Some(fire) = fire {
-            fire.set_track(&m.current.id);
             fire.set_playing(m.playing);
         }
     }
@@ -2019,13 +2018,10 @@ pub fn resize(width: f64) {
 }
 #[cfg_attr(target_os = "emscripten", wasm_bindgen)]
 pub fn tick(position: f64) {
-    let (bar, t, fire) = UI.with(|ui| {
+    let (bar, t) = UI.with(|ui| {
         let ui = ui.borrow();
-        (ui.seek.clone(), ui.elapsed.clone(), ui.fire.clone())
+        (ui.seek.clone(), ui.elapsed.clone())
     });
-    if let Some(fire) = fire {
-        fire.set_position(position);
-    }
     TICKING.set(true);
     if let Some(bar) = bar {
         bar.set_range_value(position);
@@ -2037,6 +2033,13 @@ pub fn tick(position: f64) {
         }
     }
     TICKING.set(false);
+}
+/// Receives the latest window of mono samples from the page's audio graph. An empty window means
+/// that nothing is audible.
+#[cfg(target_os = "emscripten")]
+#[wasm_bindgen]
+pub fn spectrum(samples: &[f32], rate: f64) {
+    crate::spectrum::push(samples, rate as u32);
 }
 #[cfg_attr(target_os = "emscripten", wasm_bindgen(js_name = setImage))]
 pub fn set_image(url: &str, bytes: &[u8]) {

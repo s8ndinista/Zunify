@@ -2,7 +2,7 @@
 
 A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together pins, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
 
-FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands from the bundled audio shape the glow, with bass at the center and higher frequencies toward the edges. The fire is available in demo mode, where the app can analyze the audio. The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
+FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and falls back to a slow glow of its own where it cannot. See [Spectrum](#spectrum). The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
 
 ## Run the native desktop app
 
@@ -50,6 +50,16 @@ Spotify Development Mode supports up to five allowlisted accounts on a standard 
 
 The native app opens the default browser for authorization and receives the callback locally. It controls playback through Spotify Connect. To listen on the same computer, open the official Spotify desktop app and select it under **Devices**. The browser build can play directly through the Web Playback SDK.
 
+## Spectrum
+
+The fire follows the music when the app can hear it. Spotify’s streams are protected, so only Spotify’s own players can decode them. For Spotify the app listens to audio that is already playing.
+
+- **Demo.** The app plays the demo itself and analyzes the samples on their way to the output, ahead of the volume control.
+- **Desktop, Spotify.** While you are signed in, the app records what the computer is playing and analyzes it. Play in the official Spotify app on the same computer. The recording stays in memory and is never stored or sent. macOS 14.6 or later asks once for permission to record system audio. Windows needs no permission. Linux needs a PulseAudio or PipeWire monitor source. The Windows and Linux paths are untested.
+- **Browser, Spotify.** Open **Spotify settings** and choose **Show the spectrum for Spotify**, then share the tab with its audio when the browser asks. This needs a Chromium desktop browser, and the browser asks again on each visit.
+
+When the app hears nothing for two seconds while music plays, the fire settles into a slow glow that does not follow the music. That covers music on another Spotify Connect device, a declined permission, and browsers that cannot share tab audio.
+
 ## Verify
 
 ```sh
@@ -58,6 +68,6 @@ npx playwright install chromium
 npm test
 ```
 
-The tests run against the built `dist/`. They cover demo playback, library and queue interaction, search, mobile layout, offline caching, and the Spotify sign-in and player request flow against mocked Spotify endpoints. Live Spotify playback requires the account and app configuration above.
+The tests run against the built `dist/`. They cover demo playback and its live spectrum, library and queue interaction, search, mobile layout, offline caching, and the Spotify sign-in and player request flow against mocked Spotify endpoints. Live Spotify playback requires the account and app configuration above. `cargo test` covers the analyzer, and `cargo test -- --ignored` plays a bundled sample through the audio output to check the desktop tap.
 
 FerroUI is pinned as a Git submodule tracking `main`. See [NOTICE.md](NOTICE.md) for the upstream revisions.

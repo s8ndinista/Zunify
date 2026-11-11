@@ -44,6 +44,7 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>SpotiFe.icns</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSAudioCaptureUsageDescription</key><string>SpotiFe listens to the music playing on this Mac to draw its spectrum. Nothing is recorded or sent.</string>
 </dict>
 </plist>
 PLIST

@@ -13,7 +13,8 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
     launchOptions: {
       executablePath: process.env.SPOTIFAST_TEST_CHROME,
-      args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader"],
+      // The last flag answers the tab-sharing prompt that the Spotify spectrum raises.
+      args: ["--use-gl=angle", "--use-angle=swiftshader", "--enable-unsafe-swiftshader", "--auto-accept-this-tab-capture"],
     },
   },
   webServer: { command: "npm run preview", env: { PORT: String(port), BASE_PATH: basePath }, url },

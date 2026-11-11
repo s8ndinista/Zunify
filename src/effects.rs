@@ -1,3 +1,4 @@
+use crate::spectrum;
 use ferroui_base::{
     Rect, Ref, Visual, WeakRef,
     animation::{DoubleTransition, ITransition, Transitions},
@@ -16,7 +17,11 @@ use ferroui_base::{
     threading::{Dispatcher, DispatcherPriority},
 };
 use ferroui_controls::{Border, Grid, TopLevel, hosting::ElementCompositionPreview};
-use std::{cell::Cell, rc::Rc, time::Duration};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    time::Duration,
+};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct AmbientLight;
@@ -107,7 +112,7 @@ const BAND_GROUPS: [&str; 16] = [
     "bands0", "bands1", "bands2", "bands3", "bands4", "bands5", "bands6", "bands7", "bands8",
     "bands9", "bands10", "bands11", "bands12", "bands13", "bands14", "bands15",
 ];
-const SPECTRUM_BANDS: usize = BAND_GROUPS.len() * 4;
+const _: () = assert!(BAND_GROUPS.len() * 4 == spectrum::BANDS);
 
 #[derive(Clone, Debug, Default, PartialEq)]
 struct FireFrame {
@@ -150,15 +155,18 @@ impl CustomEffect for FireFrame {
     }
 }
 
+/// The fire beneath the transport, shaped by the live spectrum of the audio the app is playing.
+/// When music plays that the app cannot hear, the fire settles into a slow glow of its own.
 pub(crate) struct TransportFire {
     host: WeakRef<Border>,
     reduced_motion: bool,
     playing: Cell<bool>,
     queued: Cell<bool>,
+    lit: Cell<bool>,
     last_frame: Cell<f64>,
-    track: Cell<Option<usize>>,
-    position: Cell<f64>,
-    position_at: Cell<f64>,
+    // When the analyser last heard anything, on the animation clock.
+    heard_at: Cell<f64>,
+    levels: RefCell<[f64; spectrum::BANDS]>,
 }
 
 impl TransportFire {
@@ -168,74 +176,78 @@ impl TransportFire {
             reduced_motion,
             playing: Cell::new(false),
             queued: Cell::new(false),
+            lit: Cell::new(false),
             last_frame: Cell::new(f64::NEG_INFINITY),
-            track: Cell::new(None),
-            position: Cell::new(0.0),
-            position_at: Cell::new(0.0),
+            heard_at: Cell::new(f64::NAN),
+            levels: RefCell::new([0.0; spectrum::BANDS]),
         })
     }
 
-    pub(crate) fn set_track(&self, id: &str) {
-        self.track.set(
-            id.strip_prefix("demo:")
-                .and_then(|index| index.parse::<usize>().ok())
-                .and_then(|index| index.checked_sub(1))
-                .filter(|index| *index < 6),
-        );
-    }
-
-    pub(crate) fn set_position(&self, position: f64) {
-        self.position.set(position);
-        self.position_at.set(self.last_frame.get());
-    }
-
     pub(crate) fn set_playing(self: &Rc<Self>, playing: bool) {
-        let active = playing && self.track.get().is_some() && !self.reduced_motion;
+        let active = playing && !self.reduced_motion;
         if self.playing.replace(active) == active {
             return;
         }
-        let Some(host) = self.host.upgrade() else {
-            return;
-        };
         if active {
             self.last_frame.set(f64::NEG_INFINITY);
-            self.position_at.set(f64::NEG_INFINITY);
+            self.heard_at.set(f64::NAN);
             self.schedule();
         } else {
+            self.levels.borrow_mut().fill(0.0);
+            self.clear();
+        }
+    }
+
+    fn clear(&self) {
+        if self.lit.replace(false)
+            && let Some(host) = self.host.upgrade()
+        {
             host.set_effect(None);
         }
     }
 
-    fn paint(host: &Border, track: usize, position: f64) {
-        // The 20 Hz analysis is baked from the exact bundled audio samples.
-        const FRAMES: usize = 540;
-        const SPECTRUM: &[u8; 6 * FRAMES * SPECTRUM_BANDS] =
-            include_bytes!("shaders/demo-spectrum.bin");
-        let cursor = (position * 20.0).clamp(0.0, (FRAMES - 1) as f64);
-        let frame = cursor as usize;
-        let start = (track * FRAMES + frame) * SPECTRUM_BANDS;
-        let next = (track * FRAMES + (frame + 1).min(FRAMES - 1)) * SPECTRUM_BANDS;
-        let band = |index| {
-            let previous = f64::from(SPECTRUM[start + index]);
-            let following = f64::from(SPECTRUM[next + index]);
-            (previous + (following - previous) * cursor.fract()) / 255.0
-        };
-        let magnitudes: [f64; SPECTRUM_BANDS] = std::array::from_fn(band);
-        let power = magnitudes
-            .iter()
-            .map(|value| value * value)
-            .sum::<f64>()
-            .sqrt()
-            * 0.56;
+    /// A slow glow that owes nothing to the music, strongest in the middle of the strip.
+    fn ambient(band: usize, now: f64) -> f64 {
+        let x = band as f64;
+        let drift = (now * 0.9 + x * 0.21).sin() * 0.5
+            + (now * 1.7 - x * 0.47).sin() * 0.3
+            + (now * 3.1 + x * 1.3).sin() * 0.2;
+        let reach = 1.0 - 0.55 * x / (spectrum::BANDS - 1) as f64;
+        (0.3 + 0.16 * drift) * reach
+    }
+
+    fn paint(&self, host: &Border, now: f64) {
+        // How long real silence may last before the fire stops waiting for the music.
+        const PATIENCE: f64 = 2.0;
+        let heard = spectrum::latest();
+        if self.heard_at.get().is_nan()
+            || heard.is_some_and(|bands| bands.iter().any(|level| *level > 0.02))
+        {
+            self.heard_at.set(now);
+        }
+        // Music on another device, or audio the app may not capture, never reaches the analyser.
+        let unheard = now - self.heard_at.get() > PATIENCE;
+        let mut levels = self.levels.borrow_mut();
+        for (index, level) in levels.iter_mut().enumerate() {
+            if unheard {
+                *level += (Self::ambient(index, now) - *level) * 0.08;
+                continue;
+            }
+            let target = heard.map_or(0.0, |bands| f64::from(bands[index]));
+            // Flames leap with the music and settle more slowly.
+            *level += (target - *level) * if target > *level { 0.7 } else { 0.28 };
+        }
+        if levels.iter().all(|level| *level < 0.004) {
+            drop(levels);
+            self.clear();
+            return;
+        }
+        let power = levels.iter().map(|value| value * value).sum::<f64>().sqrt() * 0.56;
         let bands = std::array::from_fn(|group| {
             let i = group * 4;
-            Rect::new(
-                magnitudes[i],
-                magnitudes[i + 1],
-                magnitudes[i + 2],
-                magnitudes[i + 3],
-            )
+            Rect::new(levels[i], levels[i + 1], levels[i + 2], levels[i + 3])
         });
+        self.lit.set(true);
         host.set_effect(Some(
             ImmutableCustomEffect::new(FireFrame {
                 power: power.min(1.0),
@@ -268,16 +280,7 @@ impl TransportFire {
             };
             let now = time.total_seconds();
             if now - fire.last_frame.get() >= 1.0 / 30.0 - 0.001 {
-                let anchor = fire.position_at.get();
-                let elapsed = if anchor.is_finite() {
-                    (now - anchor).clamp(0.0, 0.3)
-                } else {
-                    fire.position_at.set(now);
-                    0.0
-                };
-                if let Some(track) = fire.track.get() {
-                    Self::paint(&host, track, fire.position.get() + elapsed);
-                }
+                fire.paint(&host, now);
                 fire.last_frame.set(now);
             }
             fire.schedule();

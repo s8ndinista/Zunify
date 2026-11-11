@@ -2,8 +2,13 @@
 
 mod app;
 #[cfg(not(target_os = "emscripten"))]
+mod audio;
+#[cfg(not(target_os = "emscripten"))]
 mod desktop;
 mod effects;
+#[cfg(not(target_os = "emscripten"))]
+mod listen;
+mod spectrum;
 #[cfg(not(target_os = "emscripten"))]
 mod spotify;
 

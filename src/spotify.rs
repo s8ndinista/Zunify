@@ -264,8 +264,11 @@ impl Session {
                 Ok(mut response) => {
                     let bytes = response.body_mut().with_config().limit(8 * 1024 * 1024).read_to_vec()
                         .map_err(|_| "Could not read Spotify’s response.")?;
-                    return if bytes.is_empty() { Ok(Value::Null) } else {
-                        serde_json::from_slice(&bytes).map_err(|_| "Spotify returned an unreadable response.".into())
+                    // Player commands can answer with a body that is not JSON. Only reads need one.
+                    return match serde_json::from_slice(&bytes) {
+                        Ok(value) => Ok(value),
+                        Err(_) if bytes.is_empty() || !matches!(method, Http::Get) => Ok(Value::Null),
+                        Err(_) => Err("Spotify returned an unreadable response.".into()),
                     };
                 }
                 Err(ureq::Error::StatusCode(401)) if attempt == 0 => self.refresh()?,
