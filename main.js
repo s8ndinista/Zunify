@@ -401,6 +401,7 @@ document.querySelector("#enable-playback").onclick = async () => {
 };
 audio.addEventListener("play", () => { if (!spotify.connected && !playing) { playing = true; render(false, true); } });
 audio.addEventListener("pause", () => { if (!spotify.connected && playing) { playing = false; render(false, true); } });
+audio.addEventListener("seeked", tick);
 audio.addEventListener("ended", () => nextTrack(false, true).catch(fail));
 audio.addEventListener("error", () => { if (audio.getAttribute("src")) fail(new Error("Could not load the demo audio.")); });
 
