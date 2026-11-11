@@ -4,7 +4,7 @@ import { mixes, tracks } from "./demo.js";
 import { PLAYER_NAME, Spotify, itemOf } from "./spotify.js";
 import { AudioPath } from "./audio.js";
 import { spotifyClientId } from "./spotify-config.js";
-import { findCover, pickMusicFiles, readMusicFiles } from "./local-media.js";
+import { droppedMusicFiles, findCover, pickMusicFiles, readMusicFiles } from "./local-media.js";
 
 const spotify = new Spotify();
 const audio = document.querySelector("audio");
@@ -28,6 +28,7 @@ let playbackRevision = 0, playbackPoll, playbackRefresh;
 let queueWrite = Promise.resolve();
 let local = { tracks: [], albums: [], files: new Map(), covers: new Map() };
 let localPlayback = false, localUrl, importing = false, importVersion = 0, lastCoverLookup = -Infinity;
+let folderChoice;
 let spotifyPause, sourceRevision = 0;
 let historyEntry = { index: 0, page: "home", detail: "", query: "" };
 let backTarget;
@@ -79,15 +80,28 @@ const fail = error => notice(error?.message || "Something went wrong.");
 const releaseLocalUrl = () => { if (localUrl) URL.revokeObjectURL(localUrl); localUrl = undefined; };
 const stopDemo = () => { audio.pause(); audio.removeAttribute("src"); audio.load(); releaseLocalUrl(); };
 const rememberLocal = () => remember([...local.tracks, ...local.albums]);
-async function importFolder() {
+async function chooseMusicFolder() {
+  if (folderChoice || importing) return;
+  const choice = folderChoice = new AbortController();
+  try {
+    const entries = await pickMusicFiles(choice.signal);
+    if (!choice.signal.aborted && entries) await importFolder(() => entries);
+  } catch (error) {
+    if (!choice.signal.aborted) throw error;
+  } finally {
+    if (folderChoice === choice) folderChoice = undefined;
+  }
+}
+
+async function importFolder(chooseFiles) {
   if (importing) return;
   importing = true;
   try {
-    const entries = await pickMusicFiles();
+    const entries = await chooseFiles();
     if (!entries) return;
     if (page === "local") notice("Reading music folder…");
     const result = await readMusicFiles(entries, ++importVersion);
-    if (!result.tracks.length) throw new Error("No supported audio files were found in that folder.");
+    if (!result.tracks.length) throw new Error("No MP3, FLAC, WAV, Ogg, M4A or MP4 files were found in this folder or its subfolders.");
     if (localPlayback) {
       stopDemo(); localPlayback = false; playing = false; current = {};
     }
@@ -102,6 +116,23 @@ async function importFolder() {
     render(false, true);
   } finally { importing = false; }
 }
+
+const musicDrop = event => runtime && page === "local" && !settings.open
+  && event.dataTransfer?.types.includes("Files");
+document.querySelector("#out").addEventListener("dragover", event => {
+  if (!musicDrop(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  event.dataTransfer.dropEffect = "copy";
+}, true);
+document.querySelector("#out").addEventListener("drop", event => {
+  if (!musicDrop(event)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  folderChoice?.abort();
+  folderChoice = undefined;
+  importFolder(() => droppedMusicFiles(event.dataTransfer)).catch(fail);
+}, true);
 
 async function findLocalCover(id) {
   const album = known.get(id);
@@ -186,7 +217,7 @@ async function navigate(next, id = "", preserveStatus = false, record = true) {
     : "Demo audio plays on this device. Connect Spotify to see your Spotify Connect devices.";
   if (next === "liked" && !items.length) caption = "Songs you save appear here.";
   if (next === "library" && !items.length) caption = "Your Spotify playlists appear here.";
-  if (next === "local" && !items.length) status = "Choose a music folder to import your albums and tracks.";
+  if (next === "local" && !items.length) status = "Choose a music folder or drag the folder itself here from your file manager.";
   render(true, next === "queue", true);
   try {
     if (next === "search" && query) {
@@ -784,13 +815,19 @@ document.querySelector("#signin").addEventListener("submit", event => {
 });
 document.querySelector("#disconnect").onclick = () => {
   connectionVersion++;
+  authorizing = false;
+  clearTimeout(searchDelay);
+  clearTimeout(volumeDelay);
   cancelSeek();
   clearTimeout(playbackRefresh);
   playbackPoll = undefined;
+  deviceRows = [];
+  spotify.signOut();
   stopDemo(); localPlayback = false; sourceRevision++;
-  spotify.signOut(); sound.release(); selected = ""; known.clear(); demo();
+  sound.release(); selected = ""; known.clear(); demo();
   query = ""; runtime?.setSearchText("");
   settings.close(); navigate("home", "", false, false); render(true, true);
+  announce("Signed out of Spotify in Zunify.");
 };
 document.querySelector("#enable-playback").onclick = async () => {
   settingsStatus.textContent = "Starting playback…";
@@ -842,7 +879,7 @@ async function artwork(url) {
 async function dispatch(action, data) {
   switch (action) {
     case "art": return artwork(data);
-    case "import-folder": return importFolder();
+    case "import-folder": return chooseMusicFolder();
     case "local-cover": return findLocalCover(data);
     case "back": {
       if (backTarget) {
