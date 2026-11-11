@@ -211,13 +211,79 @@ impl ApplicationImpl for App {
             window.set_height(900.0);
             window.set_min_width(380.0);
             window.set_min_height(450.0);
-            window.set_content(Some(Control::boxed(shell)));
+            install_desktop_title_bar(&window, shell);
             crate::desktop::window_ready(&window);
             desktop.set_main_window(Some(window));
         }
         Self::parent_on_framework_initialization_completed(this);
     }
 }
+
+#[cfg(not(target_os = "emscripten"))]
+fn install_desktop_title_bar(window: &Ref<ferroui_controls::Window>, shell: Ref<Border>) {
+    use ferroui_controls::{
+        TitleBar, Window, WindowState,
+        chrome::{TitleBarDecorations, WindowDrawnDecorations},
+    };
+
+    const TITLE_BAR_HEIGHT: f64 = 32.0; // WinUI's compact title bar height in DIPs.
+
+    let title_bar = TitleBar::new();
+    title_bar.set_title("SpotiFe");
+    title_bar.set_background(Some(brush("#241A25")));
+    title_bar.resources().set(
+        "TitleBarTitleMargin",
+        Some(Rc::new(Thickness::new(10.0, 0.0, 8.0, 0.0))),
+    );
+
+    let root = grid("", "Auto,*");
+    root.set_clip_to_bounds(true);
+    put(&root, 0, 0, title_bar.clone().upcast());
+    put(&root, 0, 1, shell.upcast());
+    if !UI.with(|ui| ui.borrow().reduced) {
+        add_reveal_light(&root, 2);
+    }
+
+    window.set_extend_client_area_title_bar_height_hint(TITLE_BAR_HEIGHT);
+    window.set_extend_client_area_to_decorations_hint(true);
+    window.set_content(Some(Control::boxed(root.clone())));
+
+    let decorations = WindowDrawnDecorations::get_title_bar_decorations(window);
+    let (window_ref, root_ref, bar_ref) = (window.downgrade(), root.downgrade(), title_bar.downgrade());
+    let update_chrome = move || {
+        let (Some(window), Some(root), Some(bar)) =
+            (window_ref.upgrade(), root_ref.upgrade(), bar_ref.upgrade())
+        else {
+            return;
+        };
+        let show_title = window.is_extended_into_window_decorations()
+            && window.window_state() != WindowState::FullScreen;
+        let margin = window.window_decoration_margin();
+        bar.set_is_visible(show_title);
+        if show_title {
+            bar.set_min_height(margin.top);
+            root.set_margin(Thickness::new(margin.left, 0.0, margin.right, margin.bottom));
+            WindowDrawnDecorations::set_title_bar_decorations(
+                &window,
+                decorations & !TitleBarDecorations::TITLE,
+            );
+        } else {
+            root.set_margin(margin);
+            WindowDrawnDecorations::set_title_bar_decorations(&window, decorations);
+        }
+    };
+    update_chrome();
+    window.add_property_changed_handler(Rc::new(move |change| {
+        let property = change.property();
+        if property == Window::is_extended_into_window_decorations_property().as_property()
+            || property == Window::window_decoration_margin_property().as_property()
+            || property == Window::window_state_property().as_property()
+        {
+            update_chrome();
+        }
+    }));
+}
+
 fn create_shell() -> Ref<Border> {
     let host = surface(BG, 0.0, 0.0);
     UI.with(|ui| ui.borrow_mut().shell = Some(host.clone()));
@@ -668,15 +734,19 @@ fn scroll_repeat(name: &str, arrow_up: Option<bool>) -> Ref<RepeatButton> {
     })));
     button
 }
+fn add_reveal_light(root: &Grid, rows: i32) -> WeakRef<Border> {
+    // Paint over the page backgrounds and clip at the app's outer edge.
+    let lighting = Border::new();
+    lighting.set_is_hit_test_visible(false);
+    Grid::set_row_span(&lighting, rows);
+    put(root, 0, 0, lighting.clone().upcast());
+    effects::reveal_light(root, &lighting)
+}
+
 fn build() {
-    let (width, host, model, reduced) = UI.with(|s| {
+    let (width, host, model) = UI.with(|s| {
         let s = s.borrow();
-        (
-            s.width,
-            s.shell.clone().unwrap(),
-            s.model.clone(),
-            s.reduced,
-        )
+        (s.width, s.shell.clone().unwrap(), s.model.clone())
     });
     let mobile = width < 790.0;
     let root = grid("", if mobile { "99,*,77" } else { "76,*,86" });
@@ -718,22 +788,14 @@ fn build() {
     transport.set_child(layers);
     put(&root, 0, 2, transport.clone().upcast());
 
-    let _reveal = if !reduced {
-        // Paint over the page backgrounds and clip only at the app's outer edge.
-        let lighting = Border::new();
-        lighting.set_is_hit_test_visible(false);
-        Grid::set_row_span(&lighting, 3);
-        put(&root, 0, 0, lighting.clone().upcast());
-        Some(effects::reveal_light(&root, &lighting))
-    } else {
-        None
-    };
+    #[cfg(target_os = "emscripten")]
+    let reveal = (!UI.with(|ui| ui.borrow().reduced)).then(|| add_reveal_light(&root, 3));
 
     UI.with(|s| {
         let mut s = s.borrow_mut();
         #[cfg(target_os = "emscripten")]
         {
-            s.reveal = _reveal;
+            s.reveal = reveal;
         }
         s.fire = Some(effects::TransportFire::new(&backdrop, s.reduced));
         s.body = Some(body);
