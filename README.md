@@ -48,7 +48,7 @@ To configure an existing browser build, run `npm run configure:browser` with `SP
 
 Spotify Development Mode supports up to five allowlisted accounts on a standard app. The publisher adds testers in the dashboard. Public access requires Spotify’s approval for Extended Quota Mode. Spotify Premium is required for playback. [Spotify quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) · [Spotify Web Playback SDK](https://developer.spotify.com/documentation/web-playback-sdk)
 
-The native app opens the default browser for authorization and receives the callback locally. It prefers the Zunify browser player when that player is available through Spotify Connect. Otherwise it uses the active Spotify device. The browser build plays through the Zunify device by default. Open **Playback devices** to choose a different output.
+The native app opens the default browser for authorization and receives the callback locally. It prefers the Zunify browser player through Spotify Connect, then the active Spotify device, then a single available computer. If Spotify has no player ready, open Spotify on this computer or Zunify in your browser and press Play again. The browser build plays through the Zunify device by default. Open **Playback devices** to choose a different output.
 
 ## Spectrum
 

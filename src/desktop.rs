@@ -497,7 +497,7 @@ impl Desktop {
             "search" if self.model.query.is_empty() => self.model.caption = "Search songs, artists, albums, or playlists.".into(),
             "search" if self.model.connected => self.model.caption = "Looking for music…".into(),
             "search" => self.model.caption = if self.model.items.is_empty() { "No results in the demo library." } else { "Results in the demo library" }.into(),
-            "devices" if self.model.connected => self.model.caption = "Choose an active Spotify Connect device. Open Spotify on this computer to listen here.".into(),
+            "devices" if self.model.connected => self.model.caption = "Choose a Spotify Connect device.".into(),
             "devices" => self.model.caption = "The demo plays through this computer’s audio output.".into(),
             "detail" => self.model.caption = self.known.get(id).map_or_else(String::new, |item| item.artist.clone()),
             _ => {}
@@ -558,7 +558,7 @@ impl Desktop {
                         })
                         .collect::<Vec<_>>();
                     let caption = if devices.is_empty() {
-                        "No devices found. Open Spotify on a device and refresh."
+                        "Open Spotify on this computer or Zunify in your browser, then refresh."
                     } else {
                         "Choose a Spotify Connect device."
                     };
@@ -720,6 +720,10 @@ impl Desktop {
 
     fn toggle(&mut self) -> spotify::Result<()> {
         if self.model.connected {
+            if !self.model.playing && let Some(payload) = self.pending_play.take() {
+                self.start_playback(payload, false);
+                return Ok(());
+            }
             if self.model.current.id.is_empty() {
                 if self.model.items.iter().any(|item| item.kind == "track") {
                     return self.play("");
@@ -1329,7 +1333,7 @@ impl Desktop {
             }
             Update::PlaybackNeedsDevice(payload) => {
                 self.pending_play = Some(payload);
-                self.status("Zunify is unavailable. Open Playback devices to choose an output.");
+                self.status("Open Spotify on this computer or Zunify in your browser, then press Play again. Use Playback devices to choose another output.");
             }
             Update::Device {
                 id,
@@ -1570,6 +1574,12 @@ fn default_playback_device(data: &Value) -> Option<&str> {
         })
         .max_by_key(|&(_, priority)| priority)
         .map(|(id, _)| id)
+        .or_else(|| {
+            let mut computers = available_devices(data)
+                .filter(|(_, device)| str_field(device, "type").eq_ignore_ascii_case("computer"));
+            let (id, _) = computers.next()?;
+            computers.next().is_none().then_some(id)
+        })
 }
 
 fn device_selection_request(
@@ -1679,6 +1689,21 @@ mod tests {
         devices["devices"][1]["id"] = Value::Null;
         assert_eq!(default_playback_device(&devices), Some("horizon"));
         devices["devices"][0]["is_active"] = json!(false);
+        assert_eq!(default_playback_device(&devices), None);
+    }
+
+    #[test]
+    fn an_idle_spotify_computer_is_used_when_it_is_the_only_computer() {
+        let mut devices = json!({"devices": [
+            {"id": "speaker", "type": "Speaker", "is_active": false},
+            {"id": "computer", "type": "Computer", "is_active": false},
+            {"id": "restricted", "type": "Computer", "is_restricted": true}
+        ]});
+        assert_eq!(default_playback_device(&devices), Some("computer"));
+        devices["devices"][2]["is_restricted"] = json!(false);
+        assert_eq!(default_playback_device(&devices), None);
+        devices["devices"][1]["is_restricted"] = json!(true);
+        devices["devices"][2]["is_restricted"] = json!(true);
         assert_eq!(default_playback_device(&devices), None);
     }
 }
