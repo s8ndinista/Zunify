@@ -1,26 +1,74 @@
 uniform float2 layer_size;
 uniform float layer_scale;
-uniform float phase;
-uniform float bass;
-uniform float midrange;
-uniform float treble;
+uniform float power;
+uniform float4 bands0;
+uniform float4 bands1;
+uniform float4 bands2;
+uniform float4 bands3;
+uniform float4 bands4;
+uniform float4 bands5;
+uniform float4 bands6;
+uniform float4 bands7;
+
+uniform float4 bands8;
+uniform float4 bands9;
+uniform float4 bands10;
+uniform float4 bands11;
+uniform float4 bands12;
+uniform float4 bands13;
+uniform float4 bands14;
+uniform float4 bands15;
+
+float4 band_group(int group) {
+    if (group < 8) {
+        if (group < 4) {
+            if (group == 0) { return bands0; }
+            if (group == 1) { return bands1; }
+            if (group == 2) { return bands2; }
+            return bands3;
+        }
+        if (group == 4) { return bands4; }
+        if (group == 5) { return bands5; }
+        if (group == 6) { return bands6; }
+        return bands7;
+    }
+    if (group < 12) {
+        if (group == 8) { return bands8; }
+        if (group == 9) { return bands9; }
+        if (group == 10) { return bands10; }
+        return bands11;
+    }
+    if (group == 12) { return bands12; }
+    if (group == 13) { return bands13; }
+    if (group == 14) { return bands14; }
+    return bands15;
+}
+
+float band(int index) {
+    int group = index / 4;
+    float4 values = band_group(group);
+    int channel = index - group * 4;
+    if (channel == 0) { return values.x; }
+    if (channel == 1) { return values.y; }
+    if (channel == 2) { return values.z; }
+    return values.w;
+}
 
 half4 main(float2 coord) {
     float2 uv = coord / max(layer_size, float2(1.0));
-    float x = uv.x;
+    float distance = abs(uv.x - 0.5) * 2.0;
+    float frequency = clamp(distance * 63.0, 0.0, 63.0);
+    int lower = int(frequency);
+    int upper = lower < 63 ? lower + 1 : 63;
+    float amplitude = mix(band(lower), band(upper), smoothstep(0.0, 1.0, fract(frequency)));
+    float center = 1.0 - smoothstep(0.0, 1.0, distance);
     float height = 1.0 - uv.y;
-    float center = 1.0 - smoothstep(0.0, 0.54, abs(x - 0.5));
-    float t = phase;
-    float wave = 0.58 + (0.11 + 0.16 * midrange) * sin(43.0*x - 2.8*t)
-                      + (0.04 + 0.15 * midrange) * sin(92.0*x + 4.1*t)
-                      + (0.015 + 0.18 * treble) * sin(153.0*x - 5.5*t);
-    float crest = 0.048 + center * (0.08 + 0.63 * wave) * (0.20 + 0.73 * bass);
-    float flame = 1.0 - smoothstep(0.0, crest, height);
-    float haze = (1.0 - smoothstep(0.0, crest + 0.24, height)) * center;
-    float edge = 0.15 + center * 0.85;
-    float level = clamp(bass * 0.74 + midrange * 0.34 + treble * 0.18, 0.0, 1.0);
-    float alpha = edge * (flame * (0.25 + 0.52 * level) + haze * 0.25) * smoothstep(0.0, 0.23, level);
-    float heat = (1.0 - smoothstep(0.0, crest * 0.80, height)) * (0.24 + 0.76 * center);
-    float3 tint = mix(float3(0.97, 0.035, 0.42), float3(1.0, 0.31, 0.09), heat);
+    float peak = smoothstep(0.0, 1.0, center);
+    float crest = 0.060 + 0.32 * peak * peak * power + 0.34 * amplitude * (0.30 + 0.70 * center);
+    float ribbon = 1.0 - smoothstep(0.0, crest, height);
+    float haze = (1.0 - smoothstep(0.0, crest + 0.22, height)) * center;
+    float alpha = power * (ribbon * (0.12 + center * 0.34 + amplitude * 0.21) + 0.24 * haze);
+    float heat = (1.0 - smoothstep(0.0, crest, height)) * (0.18 + 0.68 * center);
+    float3 tint = mix(float3(0.99, 0.10, 0.40), float3(1.0, 0.31, 0.12), heat);
     return half4(tint * alpha, alpha);
 }

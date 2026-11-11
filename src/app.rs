@@ -515,7 +515,7 @@ fn build() {
     let backdrop = surface("#01000000", 0.0, 0.0);
     backdrop.set_is_hit_test_visible(false);
     backdrop.set_vertical_alignment(V::Bottom);
-    backdrop.set_height(49.0);
+    backdrop.set_height(62.0);
     let transport = surface(BG, 0.0, 0.0);
     let layers = grid("", "");
     put(&layers, 0, 0, backdrop.clone().upcast());

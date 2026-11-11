@@ -1,5 +1,5 @@
 use ferroui_base::{
-    Ref, WeakRef,
+    Rect, Ref, WeakRef,
     media::{
         effects::{
             CustomEffect, EffectParameterValue, ImmutableCustomEffect, ShaderEffectDescription,
@@ -38,36 +38,43 @@ pub(crate) fn light(host: &Border) {
     host.set_effect(Some(ImmutableCustomEffect::new(AmbientLight).into()));
 }
 
+// FerroUI transports each Rect as a float4 with no colour conversion.
+const BAND_GROUPS: [&str; 16] = [
+    "bands0", "bands1", "bands2", "bands3", "bands4", "bands5", "bands6", "bands7", "bands8",
+    "bands9", "bands10", "bands11", "bands12", "bands13", "bands14", "bands15",
+];
+const SPECTRUM_BANDS: usize = BAND_GROUPS.len() * 4;
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct FireFrame {
-    phase: f64,
-    bass: f64,
-    midrange: f64,
-    treble: f64,
+    power: f64,
+    bands: [Rect; BAND_GROUPS.len()],
 }
 
 impl CustomEffect for FireFrame {
     const NAME: &'static str = "zunify-transport-fire";
 
     fn for_each_parameter(&self, visit: &mut dyn FnMut(&'static str, EffectParameterValue)) {
-        visit("phase", self.phase.into());
-        visit("bass", self.bass.into());
-        visit("midrange", self.midrange.into());
-        visit("treble", self.treble.into());
+        visit("power", self.power.into());
+        for (name, bands) in BAND_GROUPS.into_iter().zip(self.bands) {
+            visit(name, bands.into());
+        }
     }
 
     fn set_parameter(&mut self, name: &str, value: EffectParameterValue) -> bool {
-        let Some(value) = value.as_float() else {
-            return false;
-        };
-        match name {
-            "phase" => self.phase = value,
-            "bass" => self.bass = value,
-            "midrange" => self.midrange = value,
-            "treble" => self.treble = value,
-            _ => return false,
+        if name == "power"
+            && let Some(power) = value.as_float()
+        {
+            self.power = power;
+            return true;
         }
-        true
+        if let Some(index) = BAND_GROUPS.iter().position(|group| *group == name)
+            && let Some(bands) = value.as_rect()
+        {
+            self.bands[index] = bands;
+            return true;
+        }
+        false
     }
 
     fn shader() -> Option<ShaderEffectDescription> {
@@ -127,6 +134,8 @@ impl TransportFire {
             return;
         };
         if active {
+            self.last_frame.set(f64::NEG_INFINITY);
+            self.position_at.set(f64::NEG_INFINITY);
             self.schedule();
         } else {
             host.set_effect(None);
@@ -136,23 +145,37 @@ impl TransportFire {
     fn paint(host: &Border, track: usize, position: f64) {
         // The 20 Hz analysis is baked from the exact bundled audio samples.
         const FRAMES: usize = 540;
-        const BANDS: usize = 3;
-        const SPECTRUM: &[u8; 6 * FRAMES * BANDS] = include_bytes!("shaders/demo-spectrum.bin");
+        const SPECTRUM: &[u8; 6 * FRAMES * SPECTRUM_BANDS] =
+            include_bytes!("shaders/demo-spectrum.bin");
         let cursor = (position * 20.0).clamp(0.0, (FRAMES - 1) as f64);
         let frame = cursor as usize;
-        let start = (track * FRAMES + frame) * BANDS;
-        let next = (track * FRAMES + (frame + 1).min(FRAMES - 1)) * BANDS;
+        let start = (track * FRAMES + frame) * SPECTRUM_BANDS;
+        let next = (track * FRAMES + (frame + 1).min(FRAMES - 1)) * SPECTRUM_BANDS;
         let band = |index| {
             let previous = f64::from(SPECTRUM[start + index]);
             let following = f64::from(SPECTRUM[next + index]);
             (previous + (following - previous) * cursor.fract()) / 255.0
         };
+        let magnitudes: [f64; SPECTRUM_BANDS] = std::array::from_fn(band);
+        let power = magnitudes
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+            * 0.56;
+        let bands = std::array::from_fn(|group| {
+            let i = group * 4;
+            Rect::new(
+                magnitudes[i],
+                magnitudes[i + 1],
+                magnitudes[i + 2],
+                magnitudes[i + 3],
+            )
+        });
         host.set_effect(Some(
             ImmutableCustomEffect::new(FireFrame {
-                phase: position,
-                bass: band(0),
-                midrange: band(1),
-                treble: band(2),
+                power: power.min(1.0),
+                bands,
             })
             .into(),
         ));
@@ -181,7 +204,13 @@ impl TransportFire {
             };
             let now = time.total_seconds();
             if now - fire.last_frame.get() >= 1.0 / 30.0 - 0.001 {
-                let elapsed = (now - fire.position_at.get()).clamp(0.0, 0.3);
+                let anchor = fire.position_at.get();
+                let elapsed = if anchor.is_finite() {
+                    (now - anchor).clamp(0.0, 0.3)
+                } else {
+                    fire.position_at.set(now);
+                    0.0
+                };
                 if let Some(track) = fire.track.get() {
                     Self::paint(&host, track, fire.position.get() + elapsed);
                 }

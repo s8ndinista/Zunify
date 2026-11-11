@@ -2,7 +2,7 @@
 
 A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together pins, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
 
-FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Bass, midrange, and treble from the bundled audio drive the fire. The fire is available in demo mode, where the app can analyze the audio. The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
+FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands from the bundled audio shape the glow, with bass at the center and higher frequencies toward the edges. The fire is available in demo mode, where the app can analyze the audio. The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
 
 ## Run the native desktop app
 

@@ -1,6 +1,6 @@
 """Generate the bundled, original ambient loops; no third-party recordings."""
 from array import array
-from math import cos, exp, pi, sin, sqrt, tanh
+from math import cos, exp, log2, pi, sin, sqrt, tanh
 from pathlib import Path
 import random
 import sys
@@ -11,7 +11,7 @@ out.mkdir(exist_ok=True)
 
 
 def visualizer_spectrum():
-    window_size = 1024
+    window_size = 2048
     window = [(0.5 - 0.5 * cos(2 * pi * index / (window_size - 1))) / 32768
               for index in range(window_size)]
     bits = window_size.bit_length() - 1
@@ -27,7 +27,15 @@ def visualizer_spectrum():
             if sys.byteorder != "little":
                 samples.byteswap()
         samples.extend([0] * (540 * (rate // 20) + window_size - len(samples)))
-        bands = [(31, 180, 11), (180, 1800, 18), (1800, 7600, 55)]
+        # Geometric spacing keeps bass and treble legible in the same strip.
+        first_bin = max(1, round(31 * window_size / rate))
+        last_bin = min(window_size // 2, 7600 * window_size // rate)
+        edges = [first_bin]
+        for band in range(1, 65):
+            edge = round(first_bin * (last_bin / first_bin) ** (band / 64))
+            edges.append(max(edges[-1] + 1, edge))
+        bands = [(start, end, 12 + 6 * log2(start / first_bin))
+                 for start, end in zip(edges, edges[1:])]
         for frame in range(540):
             start = frame * (rate // 20)
             bins = [samples[start + offset] * window[offset] for offset in order]
@@ -41,10 +49,8 @@ def visualizer_spectrum():
                         rotated = bins[b] * roots[offset * (window_size // step)]
                         bins[a], bins[b] = bins[a] + rotated, bins[a] - rotated
                 step *= 2
-            for low, high, gain in bands:
-                first = (low * window_size + rate - 1) // rate
-                end = (high * window_size + rate - 1) // rate
-                power = sum(abs(value) ** 2 for value in bins[first:end])
+            for start, end, gain in bands:
+                power = sum(abs(value) ** 2 for value in bins[start:end])
                 magnitude = sqrt(power) * 4 / window_size
                 spectrum.append(round((1 - exp(-magnitude * gain)) * 255))
     output = out.parents[1] / "src" / "shaders" / "demo-spectrum.bin"
