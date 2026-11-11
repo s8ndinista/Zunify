@@ -22,18 +22,20 @@ test("plays a bundled mix and supports queueing, liking and mobile layout", asyn
   page.on("pageerror", error => errors.push(error.message));
   await boot(page);
   await expect(button(page, "Play mix")).toBeAttached();
-  await page.mouse.click(320, 270);
+  await page.mouse.click(412, 350);
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0.05);
   await press(page, "Pause");
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.paused)).toBe(true);
   await expect(button(page, "Play")).toBeAttached();
-  await page.mouse.click(737, 842);
+  await press(page, "Next track");
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-5/);
   await press(page, "Like current track");
+  await press(page, "Your library");
   await press(page, "Liked songs");
   await expect(button(page, "Play Low Orbit").first()).toBeAttached();
   await press(page, "Add to queue");
-  await press(page, "Queue");
+  await press(page, "Now playing");
+  await expect(page.getByText("Up next", { exact: true })).toBeAttached();
   await expect(button(page, "Play Midnight Signal").first()).toBeAttached();
   await page.setViewportSize({ width: 390, height: 780 });
   await expect(button(page, "Spotify settings")).toBeAttached({ timeout: 15_000 });
@@ -45,15 +47,23 @@ test("plays a bundled mix and supports queueing, liking and mobile layout", asyn
 
 test("search accepts keyboard input and opens matching collections", async ({ page }) => {
   await boot(page);
-  await page.mouse.click(714, 33);
+  await page.mouse.click(755, 38);
   await page.keyboard.type("weightless");
   await expect(page.getByText("Results in the demo library")).toBeAttached();
-  await expect(button(page, "Weightless")).toHaveCount(2);
+  await expect(button(page, "Weightless")).toHaveCount(1);
   await expect(button(page, "Play Blue Hour").first()).toBeAttached();
-  await press(page, "Weightless", 1);
+  await press(page, "Weightless");
   await expect(button(page, "Play all")).toBeAttached();
   await press(page, "Play all");
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-3/);
+  await press(page, "Pin to Quickplay");
+  await press(page, "Quickplay");
+  await expect(button(page, "Weightless")).toHaveCount(2);
+  await expect(page.getByText("history", { exact: true })).toBeAttached();
+  await expect(button(page, "Play Blue Hour")).toBeAttached();
+  await boot(page);
+  await expect(button(page, "Weightless")).toHaveCount(2);
+
 });
 
 test("offline install caches the app and demo audio", async ({ page, context }) => {
@@ -66,7 +76,7 @@ test("offline install caches the app and demo audio", async ({ page, context }) 
   try {
     await boot(page);
     await expect(button(page, "Play mix")).toBeAttached();
-    await page.mouse.click(320, 270);
+    await page.mouse.click(412, 350);
     await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0.05);
   } finally {
     await context.setOffline(false);

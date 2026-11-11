@@ -1,4 +1,4 @@
-use ferroui_base::rendering::composition::ICompositionObjectAnimations;
+use crate::effects;
 
 use ferroui_base::{
     CornerRadius, FerroObjectImpl, Ref, RelativePoint, RelativeUnit, Thickness, WeakRef,
@@ -18,9 +18,8 @@ use ferroui_browser::{BrowserAccessibilityMode, BrowserAppBuilder, BrowserPlatfo
 use ferroui_controls::{
     AppBuilder, Application, ApplicationImpl, ApplicationImplExt, Border, Button,
     ColumnDefinitions, Control, Grid, Image, NewApplication, RowDefinitions, ScrollViewer, Slider,
-    StackPanel, TextBlock, TextBox,
+    StackPanel, TextBlock, TextBox, ToolTip,
     automation::AutomationProperties,
-    hosting::ElementCompositionPreview,
     media::{
         ApplicationTheme, RevealBackgroundBrush, RevealBorderBrush, RevealBrush, RevealBrushState,
     },
@@ -37,20 +36,19 @@ use std::{
     collections::HashMap,
     io::Cursor,
     rc::Rc,
-    time::Duration,
 };
 #[cfg(target_os = "emscripten")]
 use wasm_bindgen::prelude::*;
 
-const BG: &str = "#0D1013";
-const PANEL: &str = "#14191E";
-const EDGE: &str = "#242C33";
-const TEXT: &str = "#F1F5F5";
-const MUTED: &str = "#A2AEB6";
-const DIM: &str = "#83919B";
-const ACCENT: &str = "#75F0B0";
+const BG: &str = "#130E15";
+const PANEL: &str = "#1E1720";
+const EDGE: &str = "#382C37";
+const TEXT: &str = "#F8F4F7";
+const MUTED: &str = "#BBAFBA";
+const DIM: &str = "#A196A0";
+const ACCENT: &str = "#FF3595";
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub(crate) struct Item {
     pub(crate) id: String,
@@ -61,6 +59,17 @@ pub(crate) struct Item {
     pub(crate) duration: f64,
     pub(crate) kind: String,
     pub(crate) liked: bool,
+}
+#[cfg(not(target_os = "emscripten"))]
+impl Item {
+    pub(crate) fn record_in(&self, recent: &mut Vec<Self>) {
+        if self.id.is_empty() || recent.first().is_some_and(|item| item.id == self.id) {
+            return;
+        }
+        recent.retain(|item| item.id != self.id);
+        recent.insert(0, self.clone());
+        recent.truncate(6);
+    }
 }
 #[derive(Clone, Default, Deserialize)]
 #[serde(default)]
@@ -75,6 +84,8 @@ pub(crate) struct Model {
     pub(crate) items: Vec<Item>,
     pub(crate) collections: Vec<Item>,
     pub(crate) queue: Vec<Item>,
+    pub(crate) pins: Vec<Item>,
+    pub(crate) recent: Vec<Item>,
     pub(crate) current: Item,
     pub(crate) playing: bool,
     pub(crate) shuffle: bool,
@@ -92,17 +103,18 @@ struct Ui {
     reduced: bool,
     shell: Option<Ref<Border>>,
     main: Option<Ref<ScrollViewer>>,
-    side: Option<Ref<Border>>,
-    right: Option<Ref<Border>>,
+    nav: Vec<(&'static str, Ref<TextBlock>)>,
     footer: Option<Ref<Border>>,
     search: Option<Ref<TextBox>>,
     seek: Option<Ref<Slider>>,
     elapsed: Option<Ref<TextBlock>>,
     art: HashMap<String, Rc<Bitmap>>,
     waiting: HashMap<String, Vec<WeakRef<Image>>>,
+    art_order: std::collections::VecDeque<String>,
 }
 thread_local! {
     static UI: RefCell<Ui> = RefCell::default();
+    static LIGHT_PAGE: Cell<bool> = const { Cell::new(false) };
     static TICKING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -145,11 +157,11 @@ impl ApplicationImpl for App {
         this.styles().add(WinUITheme::new().as_style());
         for (key, ink) in [
             ("SliderTrackValueFill", ACCENT),
-            ("SliderTrackValueFillPointerOver", "#9EF6C9"),
-            ("SliderTrackValueFillPressed", "#4DCE92"),
+            ("SliderTrackValueFillPointerOver", "#FF86BA"),
+            ("SliderTrackValueFillPressed", "#DA256D"),
             ("SliderThumbBackground", ACCENT),
-            ("SliderThumbBackgroundPointerOver", "#9EF6C9"),
-            ("SliderThumbBackgroundPressed", "#4DCE92"),
+            ("SliderThumbBackgroundPointerOver", "#FF86BA"),
+            ("SliderThumbBackgroundPressed", "#DA256D"),
         ] {
             this.resources().set(key, Some(Rc::new(brush(ink))));
         }
@@ -199,7 +211,18 @@ fn create_shell() -> Ref<Border> {
 }
 
 fn color(s: &str) -> Color {
-    Color::parse(s).unwrap()
+    let ink = if LIGHT_PAGE.get() {
+        match s {
+            TEXT => "#211C23",
+            MUTED | DIM => "#635A63",
+            PANEL => "#F2EEF1",
+            EDGE => "#DED7DE",
+            _ => s,
+        }
+    } else {
+        s
+    };
+    Color::parse(ink).unwrap()
 }
 fn brush(s: &str) -> Rc<dyn IBrush> {
     Rc::new(ImmutableSolidColorBrush::new(color(s)))
@@ -212,6 +235,13 @@ fn label(s: &str, size: f64, ink: &str) -> Ref<TextBlock> {
     t.set_text_trimming(<dyn TextTrimming>::character_ellipsis());
     t
 }
+fn metro_title(text: &str, size: f64) -> Ref<TextBlock> {
+    let title = label(text, size, TEXT);
+    title.set_font_weight(FontWeight::Light);
+    title.set_letter_spacing(-0.9);
+    title
+}
+
 fn strong(s: &str, size: f64, ink: &str) -> Ref<TextBlock> {
     let t = label(s, size, ink);
     t.set_font_weight(FontWeight::SemiBold);
@@ -228,19 +258,6 @@ fn surface(bg: &str, pad: f64, radius: f64) -> Ref<Border> {
     b.set_corner_radius(CornerRadius::uniform(radius));
     b.set_padding(Thickness::uniform(pad));
     b
-}
-fn stroke(b: &Border, ink: &str) {
-    b.set_border_brush(Some(brush(ink)));
-    b.set_border_thickness(Thickness::uniform(1.0));
-}
-fn gradient(b: &Border, stops: &[(&str, f64)]) {
-    let g = LinearGradientBrush::new();
-    g.set_end_point(RelativePoint::new(1.0, 0.0, RelativeUnit::Relative));
-    for (c, n) in stops {
-        g.gradient_stops()
-            .add(GradientStop::with_color_and_offset(color(c), *n));
-    }
-    b.set_background(Some(g.into()));
 }
 fn stack(spacing: f64) -> Ref<StackPanel> {
     let p = StackPanel::new();
@@ -295,6 +312,7 @@ fn icon(name: &str, ink: &str, size: f64) -> Ref<Path> {
             "M2 8 H6 L11 3 V19 L6 14 H2 Z M15 7 Q19 11 15 15 M18 4 Q25 11 18 18",
             false,
         ),
+        "pin" => ("M6 3 H16 M8 3 V9 L5 13 H17 L14 9 V3 M11 13 V21", false),
         "plus" => ("M11 3 V19 M3 11 H19", false),
         "arrow" => ("M3 11 H19 M13 5 L19 11 L13 17", false),
         "external" => ("M12 3 H20 V11 M20 3 L9 14 M8 5 H3 V20 H18 V15", false),
@@ -323,15 +341,23 @@ fn button(name: &str, content: Ref<Control>, primary: bool, f: impl Fn() + 'stat
     let b = Button::new();
     b.set_content(Some(Control::boxed(content)));
     b.set_padding(Thickness::new(10.0, 6.0, 10.0, 6.0));
-    b.set_corner_radius(CornerRadius::uniform(8.0));
+    b.set_corner_radius(CornerRadius::uniform(0.0));
     b.set_background(Some(brush(if primary { ACCENT } else { "Transparent" })));
+    if !primary && LIGHT_PAGE.get() {
+        for (key, ink) in [
+            ("ButtonBackgroundPointerOver", "#EFE5EE"),
+            ("ButtonBackgroundPressed", "#F3D6E6"),
+        ] {
+            b.resources().set(key, Some(Rc::new(brush(ink))));
+        }
+    }
     if primary {
         b.resources().set(
             "ButtonBackgroundPointerOver",
-            Some(Rc::new(brush("#A2F8CA"))),
+            Some(Rc::new(brush("#FF85B7"))),
         );
         b.resources()
-            .set("ButtonBackgroundPressed", Some(Rc::new(brush("#54CF94"))));
+            .set("ButtonBackgroundPressed", Some(Rc::new(brush("#D51F6F"))));
     }
     b.set_border_thickness(Thickness::uniform(0.0));
     b.set_horizontal_content_alignment(H::Center);
@@ -350,7 +376,7 @@ fn action(name: &str, glyph: &str, ink: &str, code: &'static str, arg: &str) -> 
     b
 }
 fn pill(name: &str, glyph: &str, primary: bool, code: &'static str, arg: &str) -> Ref<Button> {
-    let ink = if primary { "#10241A" } else { TEXT };
+    let ink = if primary { "#220E19" } else { TEXT };
     let r = row(8.0);
     r.children().add(icon(glyph, ink, 14.0).upcast::<Control>());
     let t = strong(name, 12.0, ink);
@@ -361,17 +387,17 @@ fn pill(name: &str, glyph: &str, primary: bool, code: &'static str, arg: &str) -
     b.set_height(36.0);
     b.set_padding(Thickness::new(14.0, 0.0, 14.0, 0.0));
     if !primary {
-        b.set_background(Some(brush("#252E34")));
+        b.set_background(Some(brush(PANEL)));
     }
     b
 }
 fn reveal(b: &Ref<Border>) {
     let fill = RevealBackgroundBrush::new();
-    fill.set_color(color("#0875F0B0"));
+    fill.set_color(color("#06FF3595"));
     fill.set_fallback_color(color("Transparent"));
     fill.set_target_theme(ApplicationTheme::Dark);
     let edge = RevealBorderBrush::new();
-    edge.set_color(color("#2075F0B0"));
+    edge.set_color(color("#1CFF3595"));
     edge.set_fallback_color(color("Transparent"));
     edge.set_target_theme(ApplicationTheme::Dark);
     b.set_background(Some(fill.into()));
@@ -404,35 +430,9 @@ fn reveal(b: &Ref<Border>) {
         RevealBrushState::PointerOver
     );
 }
-fn fade(b: &Ref<Border>) {
-    if UI.with(|s| s.borrow().reduced) {
-        return;
-    }
-    let weak = b.downgrade();
-    let _ = b
-        .attached_to_visual_tree(move |_| {
-            let weak = weak.clone();
-            let _ = ferroui_base::threading::Dispatcher::ui_thread()
-                .invoke_async_local_with_priority(
-                    move || {
-                        let Some(b) = weak.upgrade() else { return };
-                        let Some(v) = ElementCompositionPreview::get_element_visual(&b) else {
-                            return;
-                        };
-                        let a = v.compositor().create_scalar_key_frame_animation();
-                        a.insert_key_frame(0.0, 0.25);
-                        a.insert_key_frame(1.0, 1.0);
-                        a.set_duration(Duration::from_millis(240));
-                        v.start_animation("Opacity", &*a);
-                    },
-                    ferroui_base::threading::DispatcherPriority::BACKGROUND,
-                );
-        })
-        .detach();
-}
 fn cover(url: &str, height: f64, radius: f64) -> Ref<Border> {
     let external = url.starts_with("https://");
-    let b = surface("#21342E", 0.0, if external { 0.0 } else { radius });
+    let b = surface("#2A202B", 0.0, if external { 0.0 } else { radius });
     b.set_height(height);
     b.set_clip_to_bounds(true);
     if url.is_empty() {
@@ -455,11 +455,10 @@ fn cover(url: &str, height: f64, radius: f64) -> Ref<Border> {
             image.set_source(Some(bitmap.clone()));
             false
         } else {
-            ui.waiting
-                .entry(url.to_owned())
-                .or_default()
-                .push(image.downgrade());
-            true
+            let pending = ui.waiting.entry(url.to_owned()).or_default();
+            pending.retain(|image| image.upgrade().is_some());
+            pending.push(image.downgrade());
+            pending.len() == 1
         }
     });
     if need {
@@ -479,178 +478,131 @@ fn build() {
         (s.width, s.shell.clone().unwrap(), s.model.clone())
     });
     let mobile = width < 790.0;
-    let right_visible = width >= 1120.0;
-    let root = grid("", if mobile { "56,*,77" } else { "65,*,92" });
+    let root = grid("", if mobile { "99,*,77" } else { "76,*,86" });
     root.set_clip_to_bounds(true);
-    let body = grid(
-        if right_visible {
-            "204,*,278"
-        } else if mobile {
-            "*"
-        } else {
-            "204,*"
-        },
-        "",
-    );
-    body.set_margin(if mobile {
-        Thickness::new(8.0, 0.0, 8.0, 6.0)
-    } else {
-        Thickness::new(12.0, 0.0, 12.0, 8.0)
-    });
-    let side = surface(PANEL, 0.0, 12.0);
-    if !mobile {
-        stroke(&side, EDGE);
-        put(&body, 0, 0, side.clone().upcast());
-    }
+
     let main = scroll();
-    let main_frame = surface("#101519", 0.0, 12.0);
-    stroke(&main_frame, EDGE);
-    main_frame.set_clip_to_bounds(true);
-    if !mobile {
-        main_frame.set_margin(Thickness::new(8.0, 0.0, 0.0, 0.0));
-    }
-    main_frame.set_child(main.clone());
-    put(&body, if mobile { 0 } else { 1 }, 0, main_frame.upcast());
-    let right = surface(PANEL, 0.0, 12.0);
-    if right_visible {
-        stroke(&right, EDGE);
-        right.set_margin(Thickness::new(8.0, 0.0, 0.0, 0.0));
-        put(&body, 2, 0, right.clone().upcast());
-    }
-    let footer = surface("#11161A", 0.0, 0.0);
-    let top = top_bar(mobile, &model);
-    put(&root, 0, 0, top);
-    put(&root, 0, 1, body.upcast());
-    put(&root, 0, 2, footer.clone().upcast());
+    put(&root, 0, 0, top_bar(mobile, &model));
+    put(&root, 0, 1, main.clone().upcast());
+    let footer = surface(BG, 0.0, 0.0);
+    let backdrop = surface(BG, 0.0, 0.0);
+    backdrop.set_is_hit_test_visible(false);
+    backdrop.set_max_width(920.0);
+    effects::light(&backdrop, true);
+    let transport = grid("", "");
+    put(&transport, 0, 0, backdrop.upcast());
+    put(&transport, 0, 0, footer.clone().upcast());
+    footer.set_background(None);
+    put(&root, 0, 2, transport.upcast());
+
     UI.with(|s| {
         let mut s = s.borrow_mut();
         s.main = Some(main);
-        s.side = Some(side);
-        s.right = Some(right);
         s.footer = Some(footer);
     });
-    refresh(true, true);
     host.set_child(root);
+    refresh(true, true, true);
 }
+
 fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
-    let g = grid(if mobile { "Auto,*,Auto" } else { "204,*,Auto" }, "");
+    let top = grid("7,*", "");
+    let stripe = surface(ACCENT, 0.0, 0.0);
+    let fill = LinearGradientBrush::new();
+    fill.set_end_point(RelativePoint::new(0.0, 1.0, RelativeUnit::Relative));
+    fill.gradient_stops()
+        .add(GradientStop::with_color_and_offset(color("#F00B95"), 0.0));
+    fill.gradient_stops()
+        .add(GradientStop::with_color_and_offset(color("#FF6F20"), 1.0));
+    stripe.set_background(Some(fill.into()));
+    stripe.set_vertical_alignment(V::Center);
+    stripe.set_height(50.0);
+    put(&top, 0, 0, stripe.upcast());
+
+    let g = grid(
+        if mobile { "*,Auto" } else { "Auto,*,Auto" },
+        if mobile { "49,42" } else { "" },
+    );
     g.set_margin(Thickness::new(
-        if mobile { 10.0 } else { 18.0 },
+        if mobile { 7.0 } else { 20.0 },
         0.0,
-        if mobile { 10.0 } else { 18.0 },
+        15.0,
         0.0,
     ));
-    let brand = row(9.0);
-    let mark = surface(ACCENT, 7.0, 9.0);
-    mark.set_child(icon("logo", "#11261C", 17.0));
-    brand.children().add(mark.upcast::<Control>());
-    if !mobile {
-        let t = strong("SpotiFe", 20.0, TEXT);
-        center(&t);
-        brand.children().add(t.upcast::<Control>());
+    let navigation = row(if mobile { 0.0 } else { 5.0 });
+    center(&navigation);
+    let mut labels = Vec::new();
+    for (title, accessible, route) in [
+        ("QUICKPLAY", "Quickplay", "home"),
+        ("COLLECTION", "Your library", "library"),
+        ("NOW PLAYING", "Now playing", "queue"),
+    ] {
+        let text = strong(title, if mobile { 10.0 } else { 12.0 }, MUTED);
+        text.set_letter_spacing(if mobile { 0.05 } else { 0.6 });
+        labels.push((route, text.clone()));
+        let tab = button(accessible, text.upcast(), false, move || {
+            send("navigate", route)
+        });
+        tab.set_padding(Thickness::new(
+            if mobile { 6.0 } else { 10.0 },
+            9.0,
+            if mobile { 6.0 } else { 10.0 },
+            9.0,
+        ));
+        navigation.children().add(tab.upcast::<Control>());
     }
-    let b = button("Home", brand.upcast(), false, || send("navigate", "home"));
-    center(&b);
-    b.set_horizontal_alignment(H::Left);
-    b.set_padding(Thickness::uniform(0.0));
-    put(&g, 0, 0, b.upcast());
+    put(&g, 0, 0, navigation.upcast());
+
     let search = TextBox::new();
     search.set_min_width(0.0);
-    search.set_max_width(if mobile { 340.0 } else { 420.0 });
-    search.set_margin(Thickness::new(9.0, 0.0, 10.0, 0.0));
-    search.set_height(36.0);
-    search.set_placeholder_text(Some("Search songs, artists, albums…"));
+    search.set_max_width(if mobile { 560.0 } else { 285.0 });
+    search.set_height(32.0);
+    search.set_placeholder_text(Some("Search music"));
     search.set_text(Some(&model.query));
-    search.set_background(Some(brush("#1B2228")));
-    search.set_corner_radius(CornerRadius::uniform(9.0));
-    search.set_inner_left_content(Some(Control::boxed(icon("search", MUTED, 15.0))));
+    search.set_background(Some(brush("#211923")));
+    search.set_corner_radius(CornerRadius::uniform(0.0));
+    search.set_inner_left_content(Some(Control::boxed(icon("search", MUTED, 13.0))));
     center(&search);
     AutomationProperties::set_name(&search, Some("Search songs, artists, albums"));
-    let w = search.downgrade();
+    let weak = search.downgrade();
     search.text_changed(move |_, _| {
-        if let Some(t) = w.upgrade() {
-            send("query", &t.text().unwrap_or_default());
+        if let Some(search) = weak.upgrade() {
+            send("query", &search.text().unwrap_or_default());
         }
     });
-    put(&g, 1, 0, search.clone().upcast());
-    UI.with(|ui| ui.borrow_mut().search = Some(search));
-    let tools = row(if mobile { 0.0 } else { 5.0 });
-    center(&tools);
     if mobile {
+        Grid::set_column_span(&search, 2);
+        put(&g, 0, 1, search.clone().upcast());
+    } else {
+        put(&g, 1, 0, search.clone().upcast());
+    }
+    let tools = row(5.0);
+    center(&tools);
+    if !mobile {
         tools.children().add(
-            action("Your library", "library", MUTED, "navigate", "library").upcast::<Control>(),
+            action("Playback devices", "devices", MUTED, "navigate", "devices").upcast::<Control>(),
         );
     }
-    if !mobile {
-        tools
-            .children()
-            .add(pill("Devices", "devices", false, "navigate", "devices").upcast::<Control>());
-    }
     tools.children().add(if mobile {
-        action("Spotify settings", "devices", ACCENT, "settings", "").upcast::<Control>()
+        action("Spotify settings", "logo", ACCENT, "settings", "").upcast::<Control>()
     } else {
-        pill(
-            if model.connected {
-                "Account"
-            } else {
-                "Connect Spotify"
-            },
-            "logo",
-            true,
-            "settings",
-            "",
-        )
+        let name = if model.connected {
+            "Account"
+        } else {
+            "Connect Spotify"
+        };
+        button(name, strong(name, 12.0, TEXT).upcast(), false, || {
+            send("settings", "")
+        })
         .upcast::<Control>()
     });
-    put(&g, 2, 0, tools.upcast());
-    g.upcast()
-}
-fn sidebar(m: &Model) -> Ref<Control> {
-    let p = stack(4.0);
-    p.set_margin(Thickness::new(12.0, 16.0, 12.0, 12.0));
-    for (title, glyph, page) in [
-        ("Home", "home", "home"),
-        ("Browse", "search", "search"),
-        ("Your library", "library", "library"),
-    ] {
-        let b = pill(title, glyph, false, "navigate", page);
-        b.set_horizontal_alignment(H::Stretch);
-        b.set_horizontal_content_alignment(H::Left);
-        b.set_background(Some(brush(if m.page == page {
-            "#233A31"
-        } else {
-            "Transparent"
-        })));
-        p.children().add(b.upcast::<Control>());
-    }
-    let l = kicker("YOUR COLLECTION", DIM);
-    l.set_margin(Thickness::new(10.0, 19.0, 0.0, 5.0));
-    p.children().add(l.upcast::<Control>());
-    p.children()
-        .add(side_item("Liked songs", "", "liked", "navigate").upcast::<Control>());
-    for item in m.collections.iter().take(8) {
-        p.children()
-            .add(side_item(&item.title, &item.art, &item.id, "open").upcast::<Control>());
-    }
-    let s = scroll();
-    s.set_content(Some(Rc::new(p.upcast::<Control>())));
-    s.upcast()
-}
-fn side_item(title: &str, art: &str, id: &str, code: &'static str) -> Ref<Button> {
-    let g = grid("31,*", "");
-    let img = cover(art, 28.0, 5.0);
-    img.set_width(28.0);
-    put(&g, 0, 0, img.upcast());
-    let t = strong(title, 11.0, MUTED);
-    center(&t);
-    t.set_margin(Thickness::new(7.0, 0.0, 0.0, 0.0));
-    put(&g, 1, 0, t.upcast());
-    let id = id.to_owned();
-    let b = button(title, g.upcast(), false, move || send(code, &id));
-    b.set_padding(Thickness::new(6.0, 4.0, 6.0, 4.0));
-    b.set_horizontal_content_alignment(H::Stretch);
-    b.set_horizontal_alignment(H::Stretch);
-    b
+    put(&g, if mobile { 1 } else { 2 }, 0, tools.upcast());
+    put(&top, 1, 0, g.upcast());
+    UI.with(|ui| {
+        let mut ui = ui.borrow_mut();
+        ui.search = Some(search);
+        ui.nav = labels;
+    });
+    top.upcast()
 }
 fn header(title: &str, detail: &str) -> Ref<Control> {
     let g = grid("*,Auto", "");
@@ -660,112 +612,194 @@ fn header(title: &str, detail: &str) -> Ref<Control> {
     put(&g, 1, 0, t.upcast());
     g.upcast()
 }
-fn hero(m: &Model, narrow: bool) -> Ref<Control> {
-    let featured = m.collections.first().cloned().unwrap_or_default();
-    let h = if narrow { 218.0 } else { 242.0 };
-    let b = surface("#153A30", 0.0, 13.0);
-    stroke(&b, "#35594D");
-    b.set_height(h);
-    b.set_clip_to_bounds(true);
-    let g = grid("", "");
-    if !m.connected {
-        let art = cover("art/hero.jpg", h, 12.0);
-        art.set_is_hit_test_visible(false);
-        put(&g, 0, 0, art.upcast());
-    }
-    let wash = surface("Transparent", 0.0, 12.0);
-    gradient(
-        &wash,
-        &[
-            ("#F70D211B", 0.0),
-            ("#E6153028", 0.37),
-            ("#571A392F", 0.75),
-            ("#131A392F", 1.0),
-        ],
-    );
-    wash.set_is_hit_test_visible(false);
-    put(&g, 0, 0, wash.upcast());
-    let p = stack(7.0);
-    p.set_vertical_alignment(V::Center);
-    p.set_margin(Thickness::new(
-        if narrow { 18.0 } else { 29.0 },
-        0.0,
-        12.0,
-        0.0,
-    ));
-    p.children().add(
-        kicker(
-            if m.connected {
-                "YOUR SPOTIFY LIBRARY"
-            } else {
-                "DEMO MIX"
-            },
-            ACCENT,
-        )
-        .upcast::<Control>(),
-    );
-    let headline = strong(
-        if m.connected {
-            "Your music"
-        } else {
-            "After Hours"
-        },
-        if narrow { 38.0 } else { 56.0 },
-        TEXT,
-    );
-    headline.set_letter_spacing(-1.5);
-    p.children().add(headline.upcast::<Control>());
-    let sub = label(
-        if m.connected {
-            "Pick up where you left off."
-        } else {
-            "Warm synths, slow pulses, and room to breathe."
-        },
-        13.0,
-        "#C7DED6",
-    );
-    sub.set_text_wrapping(TextWrapping::Wrap);
-    p.children().add(sub.upcast::<Control>());
-    let r = row(7.0);
-    r.set_margin(Thickness::new(0.0, 11.0, 0.0, 0.0));
-    if !featured.id.is_empty() {
-        let play = pill("Play mix", "play", true, "play", &featured.id);
-        play.set_effect(Some(Rc::new(ImmutableDropShadowEffect::new(
-            0.0,
-            3.0,
-            16.0,
-            color(ACCENT),
-            0.27,
-        ))));
-        r.children().add(play.upcast::<Control>());
-        r.children()
-            .add(pill("Explore", "arrow", false, "open", &featured.id).upcast::<Control>());
+fn artwork_tile(item: &Item, size: f64, play: bool) -> Ref<Button> {
+    let art = cover(&item.art, size, 0.0);
+    art.set_width(size);
+    let id = item.id.clone();
+    let name = if play {
+        format!("Play {}", item.title)
     } else {
-        r.children()
-            .add(pill("Find music", "search", true, "navigate", "search").upcast::<Control>());
-    }
-    p.children().add(r.upcast::<Control>());
-    put(&g, 0, 0, p.upcast());
-    b.set_child(g);
-    fade(&b);
-    b.upcast()
+        item.title.clone()
+    };
+    let tile = button(&name, art.upcast(), false, move || {
+        send(if play { "play" } else { "open" }, &id)
+    });
+    tile.set_padding(Thickness::uniform(0.0));
+    tile.set_width(size);
+    tile.set_height(size);
+    ToolTip::set_tip(&tile, Some(Rc::new(item.title.clone())));
+    tile
 }
+
+fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
+    let mobile = width < 790.0;
+    let tiles = if width >= 980.0 {
+        96.0
+    } else if mobile {
+        62.0
+    } else {
+        73.0
+    };
+    let scene = grid("", "");
+    let wash = surface(BG, 0.0, 0.0);
+    wash.set_height(if mobile { 360.0 } else { 380.0 });
+    wash.set_max_width(1100.0);
+    wash.set_vertical_alignment(V::Top);
+    wash.set_is_hit_test_visible(false);
+    effects::light(&wash, false);
+    put(&scene, 0, 0, wash.upcast());
+
+    let content = stack(if mobile { 22.0 } else { 44.0 });
+    content.set_max_width(1220.0);
+    content.set_margin(Thickness::new(
+        if mobile { 18.0 } else { 36.0 },
+        if mobile { 10.0 } else { 58.0 },
+        if mobile { 18.0 } else { 36.0 },
+        28.0,
+    ));
+    let sections = grid(
+        if mobile { "" } else { "1*,2.15*,1.7*" },
+        if mobile { "Auto,Auto,Auto" } else { "" },
+    );
+    let pins = stack(8.0);
+    pins.children()
+        .add(metro_title("pins", 42.0).upcast::<Control>());
+    if m.pins.is_empty() {
+        let note = label("Pin a playlist from your collection.", 12.0, MUTED);
+        note.set_text_wrapping(TextWrapping::Wrap);
+        pins.children().add(note.upcast::<Control>());
+        let b = pill("Your collection", "arrow", false, "navigate", "library");
+        b.set_horizontal_alignment(H::Left);
+        pins.children().add(b.upcast::<Control>());
+    } else {
+        pins.children().add(tile_rows(&m.pins, 2, tiles * 0.74));
+    }
+    let new_music = stack(8.0);
+    new_music
+        .children()
+        .add(metro_title("new", 42.0).upcast::<Control>());
+    if let Some(featured) = m.collections.first() {
+        let mosaic = row(5.0);
+        mosaic
+            .children()
+            .add(artwork_tile(featured, tiles * 1.35, false).upcast::<Control>());
+        mosaic.children().add(tile_rows(
+            &m.collections[1..m.collections.len().min(5)],
+            2,
+            tiles * 0.65,
+        ));
+        new_music.children().add(mosaic.upcast::<Control>());
+        let play = pill("Play mix", "play", true, "play", &featured.id);
+        play.set_horizontal_alignment(H::Left);
+        new_music.children().add(play.upcast::<Control>());
+    }
+    if m.collections.is_empty() {
+        new_music.children().add(
+            label("Music from your collection appears here.", 12.0, MUTED).upcast::<Control>(),
+        );
+    }
+    let history = stack(8.0);
+    history
+        .children()
+        .add(metro_title("history", 42.0).upcast::<Control>());
+    if m.recent.is_empty() {
+        let note = label("Recently played music appears here.", 12.0, MUTED);
+        note.set_text_wrapping(TextWrapping::Wrap);
+        history.children().add(note.upcast::<Control>());
+    } else {
+        history.children().add(tile_rows(
+            &m.recent,
+            if mobile { 4 } else { 3 },
+            tiles * 0.73,
+        ));
+    }
+    for (index, section) in [pins, new_music, history].into_iter().enumerate() {
+        let frame = surface("Transparent", 0.0, 0.0);
+        frame.set_margin(Thickness::new(
+            0.0,
+            0.0,
+            9.0,
+            if mobile { 16.0 } else { 0.0 },
+        ));
+        frame.set_child(section);
+        frame.set_horizontal_alignment(H::Left);
+        if animate {
+            effects::entrance(&frame, 26.0, index as u64 * 38);
+        }
+        put(
+            &sections,
+            if mobile { 0 } else { index as i32 },
+            if mobile { index as i32 } else { 0 },
+            frame.upcast(),
+        );
+    }
+    content.children().add(sections.upcast::<Control>());
+    if !m.connected {
+        let mixes = stack(8.0);
+        mixes.set_horizontal_alignment(if mobile { H::Left } else { H::Center });
+        mixes
+            .children()
+            .add(metro_title("mixes", 28.0).upcast::<Control>());
+        let line = row(5.0);
+        for mix in m.collections.iter().take(4) {
+            let title = format!("Play {}", mix.title);
+            let id = mix.id.clone();
+            let art = cover(&mix.art, tiles * 0.68, 0.0);
+            art.set_width(tiles * 0.68);
+            let tile = button(&title, art.upcast(), false, move || send("play", &id));
+            tile.set_padding(Thickness::uniform(0.0));
+            line.children().add(tile.upcast::<Control>());
+        }
+        mixes.children().add(line.upcast::<Control>());
+        content.children().add(mixes.upcast::<Control>());
+    } else if m.collections.is_empty() && !m.items.is_empty() {
+        let tracks = stack(3.0);
+        tracks
+            .children()
+            .add(metro_title("liked songs", 30.0).upcast::<Control>());
+        for (index, item) in m.items.iter().take(6).enumerate() {
+            tracks.children().add(track(item, index, false));
+        }
+        content.children().add(tracks.upcast::<Control>());
+    }
+    if !m.status.is_empty() {
+        let message = label(&m.status, 13.0, ACCENT);
+        message.set_text_wrapping(TextWrapping::Wrap);
+        content.children().add(message.upcast::<Control>());
+    }
+    put(&scene, 0, 0, content.upcast());
+    scene.upcast()
+}
+
+fn tile_rows(items: &[Item], columns: usize, size: f64) -> Ref<Control> {
+    let rows = stack(5.0);
+    for chunk in items.chunks(columns) {
+        let line = row(5.0);
+        for item in chunk {
+            line.children()
+                .add(artwork_tile(item, size, item.kind == "track").upcast::<Control>());
+        }
+        rows.children().add(line.upcast::<Control>());
+    }
+    rows.upcast()
+}
+
 fn collection_cards(items: &[Item], cols: usize) -> Ref<Control> {
     let rows = stack(8.0);
     for chunk in items.chunks(cols) {
         let g = grid(&vec!["*"; cols].join(","), "");
         for (idx, item) in chunk.iter().enumerate() {
-            let card = surface(PANEL, 0.0, 10.0);
+            let card = surface("Transparent", 0.0, 0.0);
             card.set_margin(Thickness::new(
                 if idx == 0 { 0.0 } else { 4.0 },
                 0.0,
                 if idx + 1 == cols { 0.0 } else { 4.0 },
                 0.0,
             ));
-            let light = surface("Transparent", 0.0, 10.0);
+            let light = surface("Transparent", 0.0, 0.0);
             reveal(&light);
             let p = stack(5.0);
-            let image = cover(&item.art, if cols > 2 { 108.0 } else { 95.0 }, 6.0);
+            let image = cover(&item.art, if cols > 2 { 155.0 } else { 115.0 }, 0.0);
             p.children().add(image.upcast::<Control>());
             p.children()
                 .add(strong(&item.title, 13.0, TEXT).upcast::<Control>());
@@ -785,7 +819,7 @@ fn collection_cards(items: &[Item], cols: usize) -> Ref<Control> {
     rows.upcast()
 }
 fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
-    let light = surface("Transparent", 0.0, 7.0);
+    let light = surface("Transparent", 0.0, 0.0);
     reveal(&light);
     let g = grid(
         if compact {
@@ -882,7 +916,13 @@ fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
     light.set_child(g);
     light.upcast()
 }
-fn main_page(m: &Model, width: f64) -> Ref<Control> {
+fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
+    if m.page == "home" {
+        return quickplay(m, width, animate);
+    }
+    if m.page == "queue" {
+        return now_playing(m, width, animate);
+    }
     let mobile = width < 790.0;
     let page = stack(if mobile { 12.0 } else { 15.0 });
     page.set_margin(Thickness::uniform(if mobile { 12.0 } else { 20.0 }));
@@ -938,7 +978,7 @@ fn main_page(m: &Model, width: f64) -> Ref<Control> {
             );
             page.children().add(help.upcast::<Control>());
             page.children().add(input.clone().upcast::<Control>());
-            let content = strong("Sign in with Spotify", 12.0, "#11261C");
+            let content = strong("Sign in with Spotify", 12.0, "#220E19");
             let sign_in = button("Sign in with Spotify", content.upcast(), true, move || {
                 send("connect", &input.text().unwrap_or_default());
             });
@@ -956,40 +996,17 @@ fn main_page(m: &Model, width: f64) -> Ref<Control> {
         }
         return page.upcast();
     }
-    let cols = if width >= 980.0 && (width < 1120.0 || width > 1270.0) {
+    let cols = if width >= 980.0 {
         4
-    } else if width > 600.0 {
+    } else if width >= 600.0 {
         3
     } else {
         2
     };
-    if m.page == "home" {
-        page.children().add(hero(m, mobile));
-        if !m.collections.is_empty() {
-            page.children().add(header(
-                if m.connected {
-                    "Your playlists"
-                } else {
-                    "Made for the moment"
-                },
-                if m.connected { "" } else { "CURATED MIXES" },
-            ));
-            page.children().add(collection_cards(
-                &m.collections[..m.collections.len().min(cols)],
-                cols,
-            ));
-        }
-        page.children().add(header(
-            if m.connected {
-                "Liked songs"
-            } else {
-                "On rotation"
-            },
-            "TRACKS",
-        ));
-    } else if m.page == "queue" {
-        return now_playing(m, mobile);
-    } else {
+    if m.page == "library" {
+        return collection(m, width, animate);
+    }
+    {
         page.children().add(header(&m.title, ""));
         if !m.caption.is_empty() {
             let t = label(&m.caption, 13.0, MUTED);
@@ -1032,9 +1049,17 @@ fn main_page(m: &Model, width: f64) -> Ref<Control> {
                     .upcast::<Control>(),
                 );
             }
-            if has_tracks || m.detail.starts_with("spotify:") {
-                page.children().add(actions.upcast::<Control>());
+            if !m.detail.starts_with("section:") {
+                let name = if m.pins.iter().any(|item| item.id == m.detail) {
+                    "Unpin from Quickplay"
+                } else {
+                    "Pin to Quickplay"
+                };
+                actions
+                    .children()
+                    .add(pill(name, "pin", false, "pin", &m.detail).upcast::<Control>());
             }
+            page.children().add(actions.upcast::<Control>());
         }
     }
     if !m.status.is_empty() {
@@ -1045,7 +1070,7 @@ fn main_page(m: &Model, width: f64) -> Ref<Control> {
     let cards = m
         .items
         .iter()
-        .filter(|i| !i.kind.is_empty() && i.kind != "track")
+        .filter(|i| matches!(i.kind.as_str(), "album" | "artist" | "playlist"))
         .cloned()
         .collect::<Vec<_>>();
     if !cards.is_empty() {
@@ -1061,9 +1086,95 @@ fn main_page(m: &Model, width: f64) -> Ref<Control> {
         list.children().add(track(item, idx, false));
     }
     page.children().add(list.upcast::<Control>());
+    let frame = surface(
+        if LIGHT_PAGE.get() {
+            "#FCFAFC"
+        } else {
+            "Transparent"
+        },
+        0.0,
+        0.0,
+    );
+    frame.set_child(page);
+    if animate {
+        effects::entrance(&frame, 20.0, 0);
+    }
+    frame.upcast()
+}
+fn collection(m: &Model, width: f64, animate: bool) -> Ref<Control> {
+    let compact = width < 790.0;
+    let page = stack(20.0);
+    page.set_max_width(1370.0);
+    page.set_margin(Thickness::new(
+        if compact { 16.0 } else { 44.0 },
+        16.0,
+        if compact { 16.0 } else { 44.0 },
+        30.0,
+    ));
+    let heading = surface("Transparent", 0.0, 0.0);
+    heading.set_horizontal_alignment(H::Left);
+    heading.set_child(metro_title("music", 44.0));
+    if animate {
+        effects::entrance(&heading, 24.0, 0);
+    }
+    page.children().add(heading.upcast::<Control>());
+    let filters = row(3.0);
+    filters
+        .children()
+        .add(pill("Liked songs", "heart", false, "navigate", "liked").upcast::<Control>());
+    for (name, id) in [("Artists", "section:artists"), ("Albums", "section:albums")] {
+        if m.connected {
+            filters
+                .children()
+                .add(pill(name, "library", false, "open", id).upcast::<Control>());
+        }
+    }
+    page.children().add(filters.upcast::<Control>());
+    let catalog = grid(
+        if compact { "" } else { "3*,2*" },
+        if compact { "Auto,Auto" } else { "" },
+    );
+    let albums = stack(12.0);
+    albums
+        .children()
+        .add(kicker("PLAYLISTS", TEXT).upcast::<Control>());
+    if m.collections.is_empty() {
+        albums
+            .children()
+            .add(label("Your playlists appear here.", 13.0, MUTED).upcast::<Control>());
+    } else {
+        albums.children().add(collection_cards(
+            &m.collections,
+            if width >= 1050.0 { 3 } else { 2 },
+        ));
+    }
+    put(&catalog, 0, 0, albums.upcast());
+
+    let songs = stack(5.0);
+    songs.set_margin(if compact {
+        Thickness::new(0.0, 18.0, 0.0, 0.0)
+    } else {
+        Thickness::new(28.0, 0.0, 0.0, 0.0)
+    });
+    songs
+        .children()
+        .add(kicker("SONGS", TEXT).upcast::<Control>());
+    let tracks = m.items.iter().filter(|item| item.kind == "track");
+    for (index, item) in tracks.enumerate() {
+        songs.children().add(track(item, index, false));
+    }
+    put(
+        &catalog,
+        if compact { 0 } else { 1 },
+        if compact { 1 } else { 0 },
+        songs.upcast(),
+    );
+    page.children().add(catalog.upcast::<Control>());
     page.upcast()
 }
-fn now_playing(m: &Model, mobile: bool) -> Ref<Control> {
+
+fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
+    let mobile = width < 790.0;
     let p = stack(11.0);
     p.set_margin(Thickness::uniform(14.0));
     let heading = grid("*,Auto", "");
@@ -1072,15 +1183,57 @@ fn now_playing(m: &Model, mobile: bool) -> Ref<Control> {
     center(&live);
     put(&heading, 1, 0, live.upcast());
     p.children().add(heading.upcast::<Control>());
-    let a = cover(&m.current.art, if mobile { 230.0 } else { 218.0 }, 9.0);
+    let art_size = if mobile { 190.0 } else { 270.0 };
+    let stage = grid("", "");
+    let wash = surface(BG, 0.0, 0.0);
+    wash.set_is_hit_test_visible(false);
+    wash.set_max_width(850.0);
+    effects::light(&wash, false);
+    put(&stage, 0, 0, wash.upcast());
+    let art = row(5.0);
+    art.set_horizontal_alignment(H::Center);
+    art.set_margin(Thickness::uniform(12.0));
+    if !mobile {
+        art.children().add(tile_rows(
+            &m.recent
+                .iter()
+                .filter(|item| item.art != m.current.art)
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+            2,
+            78.0,
+        ));
+    }
+    let a = cover(&m.current.art, art_size, 0.0);
+    a.set_width(art_size);
     a.set_effect(Some(Rc::new(ImmutableDropShadowEffect::new(
         0.0,
-        3.0,
-        12.0,
+        5.0,
+        16.0,
         color("#000000"),
-        0.6,
+        0.64,
     ))));
-    p.children().add(a.upcast::<Control>());
+    art.children().add(a.upcast::<Control>());
+    if !mobile {
+        art.children().add(tile_rows(
+            &m.queue
+                .iter()
+                .filter(|item| item.art != m.current.art)
+                .take(4)
+                .cloned()
+                .collect::<Vec<_>>(),
+            2,
+            78.0,
+        ));
+    }
+    let frame = surface("Transparent", 0.0, 0.0);
+    frame.set_child(art);
+    if animate {
+        effects::entrance(&frame, 36.0, 0);
+    }
+    put(&stage, 0, 0, frame.upcast());
+    p.children().add(stage.upcast::<Control>());
     let identity = grid("*,Auto,Auto", "");
     let names = stack(3.0);
     names.children().add(
@@ -1176,62 +1329,120 @@ fn slider(name: &str, max: f64, value: f64, code: &'static str) -> Ref<Slider> {
     s
 }
 fn player(m: &Model, width: f64) -> Ref<Control> {
-    let compact = width < 690.0;
+    let compact = width < 920.0;
     let g = grid(
-        if compact { "*,Auto" } else { "24*,52*,24*" },
+        if compact { "*,Auto" } else { "*,*,*,Auto" },
         if compact { "42,25" } else { "" },
     );
     g.set_margin(Thickness::new(
-        if compact { 10.0 } else { 16.0 },
+        if compact { 10.0 } else { 24.0 },
         5.0,
-        if compact { 10.0 } else { 16.0 },
+        if compact { 10.0 } else { 24.0 },
         2.0,
     ));
-    if !compact {
-        center(&g);
-    }
-    let id = grid(if compact { "38,*" } else { "53,*,36" }, "");
-    center(&id);
-    let a = cover(&m.current.art, if compact { 33.0 } else { 47.0 }, 6.0);
-    a.set_width(if compact { 33.0 } else { 47.0 });
-    put(&id, 0, 0, a.upcast());
-    let n = stack(2.0);
-    center(&n);
-    n.children().add(
-        strong(
-            if m.current.title.is_empty() {
-                "Choose something to play"
-            } else {
-                &m.current.title
-            },
-            12.0,
-            TEXT,
-        )
-        .upcast::<Control>(),
-    );
-    n.children()
+    center(&g);
+
+    let duration = label(&time(m.current.duration), 10.0, DIM);
+    duration.set_horizontal_alignment(H::Right);
+    center(&duration);
+    let elapsed = label("0:00", 10.0, DIM);
+    center(&elapsed);
+    let bar = slider("Seek", m.current.duration, 0.0, "seek");
+    let seek = grid("34,*,34", "");
+    put(&seek, 0, 0, elapsed.clone().upcast());
+    put(&seek, 1, 0, bar.clone().upcast());
+    put(&seek, 2, 0, duration.upcast());
+    UI.with(|ui| {
+        let mut ui = ui.borrow_mut();
+        ui.seek = Some(bar);
+        ui.elapsed = Some(elapsed);
+    });
+
+    let title = if m.current.title.is_empty() {
+        "Choose something to play"
+    } else {
+        &m.current.title
+    };
+    let name = stack(1.0);
+    name.children()
+        .add(strong(title, 12.0, TEXT).upcast::<Control>());
+    name.children()
         .add(label(&m.current.artist, 10.5, MUTED).upcast::<Control>());
-    put(&id, 1, 0, n.upcast());
-    if !compact && !m.current.id.is_empty() {
-        put(
-            &id,
-            2,
-            0,
+    let playing = button("Open Now Playing", name.upcast(), false, || {
+        send("navigate", "queue")
+    });
+    playing.set_horizontal_content_alignment(H::Left);
+    playing.set_padding(Thickness::uniform(0.0));
+    center(&playing);
+
+    let size = if compact { 33.0 } else { 42.0 };
+    let art = cover(&m.current.art, size, 0.0);
+    art.set_width(size);
+    center(&art);
+    let identity = grid(if compact { "38,*" } else { "49,*" }, "");
+    put(&identity, 0, 0, art.upcast());
+    if compact {
+        put(&identity, 1, 0, playing.upcast());
+        put(&g, 0, 0, identity.upcast());
+        Grid::set_column_span(&seek, 2);
+        put(&g, 0, 1, seek.upcast());
+    } else {
+        let controls = grid("*,Auto", "Auto,Auto");
+        put(&controls, 0, 0, playing.upcast());
+        if !m.current.id.is_empty() {
+            put(
+                &controls,
+                1,
+                0,
+                action(
+                    "Like current track",
+                    if m.current.liked { "heart-on" } else { "heart" },
+                    if m.current.liked { ACCENT } else { MUTED },
+                    "like",
+                    &m.current.id,
+                )
+                .upcast(),
+            );
+        }
+        Grid::set_column_span(&seek, 2);
+        put(&controls, 0, 1, seek.upcast());
+        put(&identity, 1, 0, controls.upcast());
+        identity.set_width(315.0);
+        identity.set_horizontal_alignment(H::Center);
+        Grid::set_column_span(&identity, 4);
+        put(&g, 0, 0, identity.upcast());
+
+        let left = row(3.0);
+        center(&left);
+        left.children().add(
             action(
-                "Like current track",
-                if m.current.liked { "heart-on" } else { "heart" },
-                ACCENT,
-                "like",
-                &m.current.id,
+                "Select playback device",
+                "devices",
+                MUTED,
+                "navigate",
+                "devices",
             )
-            .upcast(),
+            .upcast::<Control>(),
         );
+        left.children()
+            .add(action("Queue", "queue", MUTED, "navigate", "queue").upcast::<Control>());
+        Grid::set_column_span(&left, 2);
+        put(&g, 0, 0, left.upcast());
     }
-    put(&g, 0, 0, id.upcast());
-    let p = stack(0.0);
+
     let buttons = row(2.0);
-    buttons.set_horizontal_alignment(H::Center);
+    center(&buttons);
     if !compact {
+        buttons.children().add(
+            action(
+                "Repeat",
+                "repeat",
+                if m.repeat { ACCENT } else { MUTED },
+                "repeat",
+                "",
+            )
+            .upcast::<Control>(),
+        );
         buttons.children().add(
             action(
                 "Shuffle",
@@ -1246,118 +1457,69 @@ fn player(m: &Model, width: f64) -> Ref<Control> {
     buttons
         .children()
         .add(action("Previous track", "prev", TEXT, "previous", "").upcast::<Control>());
-    let b = button(
+    let toggle = button(
         if m.playing { "Pause" } else { "Play" },
-        icon(if m.playing { "pause" } else { "play" }, "#10241A", 16.0).upcast(),
-        true,
+        icon(if m.playing { "pause" } else { "play" }, TEXT, 14.0).upcast(),
+        false,
         || send("toggle", ""),
     );
-    b.set_width(34.0);
-    b.set_height(34.0);
-    b.set_corner_radius(CornerRadius::uniform(17.0));
-    b.set_padding(Thickness::uniform(0.0));
-    buttons.children().add(b.upcast::<Control>());
+    toggle.set_width(36.0);
+    toggle.set_height(36.0);
+    toggle.set_corner_radius(CornerRadius::uniform(18.0));
+    toggle.set_border_brush(Some(brush(MUTED)));
+    toggle.set_border_thickness(Thickness::uniform(1.5));
+    toggle.set_padding(Thickness::uniform(0.0));
+    buttons.children().add(toggle.upcast::<Control>());
     buttons
         .children()
         .add(action("Next track", "next", TEXT, "next", "").upcast::<Control>());
-    if !compact {
-        buttons.children().add(
-            action(
-                "Repeat",
-                "repeat",
-                if m.repeat { ACCENT } else { MUTED },
-                "repeat",
-                "",
-            )
-            .upcast::<Control>(),
-        );
-    }
-    buttons
-        .children()
-        .add(action("Queue", "queue", MUTED, "navigate", "queue").upcast::<Control>());
     if compact {
-        put(&g, 1, 0, buttons.upcast());
-    } else {
-        p.children().add(buttons.upcast::<Control>());
-    }
-    let seek = grid("36,*,36", "");
-    let elapsed = label("0:00", 10.0, DIM);
-    center(&elapsed);
-    let duration = label(&time(m.current.duration), 10.0, DIM);
-    center(&duration);
-    duration.set_horizontal_alignment(H::Right);
-    let bar = slider("Seek", m.current.duration, 0.0, "seek");
-    put(&seek, 0, 0, elapsed.clone().upcast());
-    put(&seek, 1, 0, bar.clone().upcast());
-    put(&seek, 2, 0, duration.upcast());
-    UI.with(|ui| {
-        let mut ui = ui.borrow_mut();
-        ui.seek = Some(bar);
-        ui.elapsed = Some(elapsed);
-    });
-    if compact {
-        Grid::set_column_span(&seek, 2);
-        put(&g, 0, 1, seek.upcast());
-    } else {
-        p.children().add(seek.upcast::<Control>());
-        p.set_max_width(495.0);
-        put(&g, 1, 0, p.upcast());
-        let tools = row(5.0);
-        center(&tools);
-        tools.set_horizontal_alignment(H::Right);
-        tools.children().add(
-            action(
-                "Select playback device",
-                "devices",
-                MUTED,
-                "navigate",
-                "devices",
-            )
-            .upcast::<Control>(),
-        );
-        tools
+        buttons
             .children()
-            .add(icon("volume", MUTED, 16.0).upcast::<Control>());
-        let v = slider("Volume", 100.0, m.volume, "volume");
-        v.set_width(78.0);
-        tools.children().add(v.upcast::<Control>());
-        put(&g, 2, 0, tools.upcast());
+            .add(action("Queue", "queue", MUTED, "navigate", "queue").upcast::<Control>());
+    } else {
+        buttons
+            .children()
+            .add(icon("volume", ACCENT, 14.0).upcast::<Control>());
+        let volume = slider("Volume", 100.0, m.volume, "volume");
+        volume.set_width(62.0);
+        center(&volume);
+        buttons.children().add(volume.upcast::<Control>());
     }
+    put(&g, if compact { 1 } else { 3 }, 0, buttons.upcast());
     g.upcast()
 }
-fn refresh(body: bool, playback: bool) {
-    let (m, width, main, side, right, footer) = UI.with(|ui| {
+fn refresh(body: bool, playback: bool, animate: bool) {
+    if !body && !playback {
+        return;
+    }
+    let (m, width, main, footer, nav, reduced) = UI.with(|ui| {
         let ui = ui.borrow();
         (
             ui.model.clone(),
             ui.width,
             ui.main.clone(),
-            ui.side.clone(),
-            ui.right.clone(),
             ui.footer.clone(),
+            ui.nav.clone(),
+            ui.reduced,
         )
     });
     if body {
-        if let Some(main) = main {
-            main.set_content(Some(Rc::new(main_page(&m, width))));
+        let collection = m.page == "library" || m.page == "liked" || m.page == "detail";
+        for (route, text) in nav {
+            let selected = m.page == route || (route == "library" && collection);
+            text.set_foreground(Some(brush(if selected { TEXT } else { MUTED })));
         }
-        if width >= 790.0
-            && let Some(side) = side
-        {
-            side.set_child(sidebar(&m));
+        if let Some(main) = main {
+            LIGHT_PAGE.set(collection);
+            let view = main_page(&m, width, animate && !reduced);
+            LIGHT_PAGE.set(false);
+            main.set_background(Some(brush(if collection { "#FCFAFC" } else { BG })));
+            main.set_content(Some(Rc::new(view)));
         }
     }
-    if playback {
-        if width >= 1120.0
-            && let Some(right) = right
-        {
-            let s = scroll();
-            s.set_content(Some(Rc::new(now_playing(&m, false))));
-            right.set_child(s);
-        }
-        if let Some(footer) = footer {
-            footer.set_child(player(&m, width));
-        }
+    if playback && let Some(footer) = footer {
+        footer.set_child(player(&m, width));
     }
 }
 #[cfg(target_os = "emscripten")]
@@ -1392,16 +1554,43 @@ pub fn update_model(json: &str, body: bool, playback: bool, reset: bool) {
     apply_model(model, body, playback, reset);
 }
 pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool) {
-    let connected_changed = UI.with(|ui| {
+    let (connected_changed, body, playback) = UI.with(|ui| {
         let mut ui = ui.borrow_mut();
-        let changed = ui.model.connected != model.connected;
+        let previous = &ui.model;
+        let connected_changed = previous.connected != model.connected;
+        let body = body
+            && (reset
+                || match model.page.as_str() {
+                    "home" => {
+                        previous.page != model.page
+                            || previous.items != model.items
+                            || previous.collections != model.collections
+                            || previous.pins != model.pins
+                            || previous.recent != model.recent
+                            || previous.status != model.status
+                    }
+                    "queue" => {
+                        previous.page != model.page
+                            || previous.queue != model.queue
+                            || previous.current != model.current
+                            || previous.playing != model.playing
+                            || previous.status != model.status
+                    }
+                    _ => true,
+                });
+        let playback = playback
+            && (previous.current != model.current
+                || previous.playing != model.playing
+                || previous.shuffle != model.shuffle
+                || previous.repeat != model.repeat
+                || previous.volume != model.volume);
         ui.model = model;
-        changed
+        (connected_changed, body, playback)
     });
     if connected_changed {
         build();
     } else {
-        refresh(body, playback);
+        refresh(body, playback, reset);
     }
     if reset {
         let main = UI.with(|s| s.borrow().main.clone());
@@ -1418,7 +1607,7 @@ pub fn resize(width: f64) {
         ui.width = width;
         old
     });
-    if [600.0, 690.0, 790.0, 980.0, 1120.0, 1271.0]
+    if [600.0, 790.0, 920.0, 980.0, 1050.0]
         .iter()
         .any(|b| (old < *b) != (width < *b))
     {
@@ -1436,7 +1625,10 @@ pub fn tick(position: f64) {
         bar.set_range_value(position);
     }
     if let Some(t) = t {
-        t.set_text(Some(&time(position)));
+        let value = time(position);
+        if t.text().as_deref() != Some(value.as_str()) {
+            t.set_text(Some(&value));
+        }
     }
     TICKING.set(false);
 }
@@ -1446,8 +1638,13 @@ pub fn set_image(url: &str, bytes: &[u8]) {
         let bitmap = Rc::new(bitmap);
         let waiting = UI.with(|ui| {
             let mut ui = ui.borrow_mut();
-            if ui.art.len() >= 120 {
-                ui.art.clear();
+            if !ui.art.contains_key(url) {
+                if ui.art.len() >= 96
+                    && let Some(oldest) = ui.art_order.pop_front()
+                {
+                    ui.art.remove(&oldest);
+                }
+                ui.art_order.push_back(url.to_owned());
             }
             ui.art.insert(url.into(), bitmap.clone());
             ui.waiting.remove(url).unwrap_or_default()
@@ -1457,6 +1654,8 @@ pub fn set_image(url: &str, bytes: &[u8]) {
                 i.set_source(Some(bitmap.clone()));
             }
         }
+    } else {
+        UI.with(|ui| ui.borrow_mut().waiting.remove(url));
     }
 }
 

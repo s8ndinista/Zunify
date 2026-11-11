@@ -14,6 +14,7 @@ use std::{
     cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
     io::Cursor,
+    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -160,10 +161,24 @@ impl Network {
     }
 }
 
+fn pin_path() -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    let config = std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support"));
+    #[cfg(target_os = "windows")]
+    let config = std::env::var_os("APPDATA").map(PathBuf::from);
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
+    config.map(|dir| dir.join("SpotiFe").join("quickplay-pins.json"))
+}
+
 struct Desktop {
     model: Model,
     demo: Demo,
     demo_liked: HashSet<String>,
+    demo_pins: Vec<String>,
     liked: HashSet<String>,
     known: HashMap<String, Item>,
     history: Vec<Item>,
@@ -195,6 +210,16 @@ impl Desktop {
     fn new() -> Self {
         let demo: Demo = serde_json::from_str(include_str!("../wwwroot/demo-library.json"))
             .expect("bundled demo library is valid");
+        let demo_pins = pin_path()
+            .and_then(|path| std::fs::read(path).ok())
+            .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+            .unwrap_or_else(|| {
+                demo.mixes
+                    .iter()
+                    .take(2)
+                    .map(|mix| mix.item.id.clone())
+                    .collect()
+            });
         let mut state = Self {
             model: Model {
                 volume: 65.0,
@@ -202,6 +227,7 @@ impl Desktop {
                 ..Model::default()
             },
             demo,
+            demo_pins,
             demo_liked: ["demo:1".to_owned(), "demo:3".to_owned()].into(),
             liked: HashSet::new(),
             known: HashMap::new(),
@@ -246,6 +272,13 @@ impl Desktop {
                 .chain(&self.model.collections)
                 .map(|item| (item.id.clone(), item.clone())),
         );
+        self.model.pins = self
+            .demo_pins
+            .iter()
+            .filter_map(|id| self.known.get(id).cloned())
+            .take(6)
+            .collect();
+        self.model.recent.clear();
         self.model.current = self.demo.tracks[0].clone();
         self.order = self.demo.tracks.clone();
         self.upcoming = self.order.iter().skip(1).cloned().collect();
@@ -279,7 +312,7 @@ impl Desktop {
     fn render(&self, body: bool, player: bool, reset: bool) {
         app::apply_model(
             self.display_model(),
-            body || (player && self.model.page == "queue"),
+            body || (player && matches!(self.model.page.as_str(), "home" | "queue")),
             player,
             reset,
         );
@@ -404,9 +437,9 @@ impl Desktop {
         self.model.page = page.into();
         self.model.detail = id.into();
         self.model.title = match page {
-            "home" => "Home",
+            "home" => "Quickplay",
             "search" => "Browse",
-            "library" => "Your library",
+            "library" => "Collection",
             "liked" => "Liked songs",
             "devices" => "Playback devices",
             "detail" => self
@@ -430,7 +463,11 @@ impl Desktop {
                     items.push(section("artists", "Artists", "Followed artists"));
                 }
                 self.remember(&items);
-                items.extend(self.model.collections.iter().cloned());
+                items.extend(if self.model.connected {
+                    self.saved_tracks()
+                } else {
+                    self.demo.tracks.clone()
+                });
                 items
             }
             "search" if !self.model.connected => self.search_demo(),
@@ -556,6 +593,7 @@ impl Desktop {
             .play(&item.id, self.model.volume)?;
         self.position = 0.0;
         self.model.playing = true;
+        item.record_in(&mut self.model.recent);
         self.model.current = item;
         self.model.queue = self.upcoming.iter().cloned().collect();
         self.model.status.clear();
@@ -781,7 +819,9 @@ impl Desktop {
         } else {
             self.liked.remove(&item.id);
         }
-        if self.model.page == "liked" || (self.model.page == "home" && self.model.connected) {
+        if self.model.page == "liked"
+            || (matches!(self.model.page.as_str(), "home" | "library") && self.model.connected)
+        {
             self.model.items = self.saved_tracks();
         }
         self.render(true, true, false);
@@ -845,6 +885,31 @@ impl Desktop {
             }
             "open" if value == "section:liked" => self.navigate("liked", ""),
             "open" => self.navigate("detail", value),
+            "pin" => {
+                if let Some(index) = self.model.pins.iter().position(|item| item.id == value) {
+                    self.model.pins.remove(index);
+                } else if let Some(item) = self.known.get(value) {
+                    if self.model.pins.len() >= 6 {
+                        self.status("Quickplay holds six pins. Remove one to make room.");
+                        return Ok(());
+                    }
+                    self.model.pins.push(item.clone());
+                }
+                if !self.model.connected {
+                    self.demo_pins = self.model.pins.iter().map(|item| item.id.clone()).collect();
+                    if let Some(path) = pin_path()
+                        && let Some(parent) = path.parent()
+                        && std::fs::create_dir_all(parent).is_ok()
+                        && let Ok(bytes) = serde_json::to_vec(&self.demo_pins)
+                    {
+                        let temporary = path.with_extension("new");
+                        if std::fs::write(&temporary, bytes).is_ok() {
+                            let _ = std::fs::rename(temporary, path);
+                        }
+                    }
+                }
+                self.render(true, false, false);
+            }
             "play" => self.play(value)?,
             "toggle" => self.toggle()?,
             "next" => self.next(false, false)?,
@@ -972,6 +1037,8 @@ impl Desktop {
                 self.model.connected = true;
                 self.model.current = Item::default();
                 self.model.collections.clear();
+                self.model.pins.clear();
+                self.model.recent.clear();
                 self.model.queue.clear();
                 self.model.playing = false;
                 self.position = 0.0;
@@ -1063,6 +1130,9 @@ impl Desktop {
                 self.model.repeat = repeat;
                 if let Some(track) = track {
                     self.remember(std::slice::from_ref(&track));
+                    if playing {
+                        track.record_in(&mut self.model.recent);
+                    }
                     self.model.current = track;
                 }
                 if changed {
@@ -1116,9 +1186,7 @@ impl Desktop {
         }
         while let Ok((url, bytes)) = self.network.images.try_recv() {
             self.requested_art.remove(&url);
-            if !bytes.is_empty() {
-                app::set_image(&url, &bytes);
-            }
+            app::set_image(&url, &bytes);
         }
         let now = Instant::now();
         if self.search_at.is_some_and(|time| time <= now) {

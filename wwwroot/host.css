@@ -1,24 +1,24 @@
-:root { color-scheme: dark; font: 15px/1.5 system-ui,sans-serif; background: #0d1013; color: #f1f5f5; }
+:root { color-scheme: dark; font: 15px/1.5 system-ui,sans-serif; background: #130e15; color: #f8f4f7; }
 * { box-sizing: border-box; }
 html, body, #out { width: 100%; height: 100%; overflow: hidden; margin: 0; }
 #out { position: relative; }
-#splash { position: fixed; inset: 0; z-index: 5; display: grid; justify-items: center; align-content: center; gap: .4rem; background: radial-gradient(ellipse at 50% 45%, #1b352a, #0d1013 62%); }
+#splash { position: fixed; inset: 0; z-index: 5; display: grid; justify-items: center; align-content: center; gap: .4rem; background: radial-gradient(ellipse at 50% 45%, #392233, #130e15 62%); }
 #splash h1, #splash p { margin: 0; }
-#splash p { color: #a2aeb6; }
+#splash p { color: #bbafba; }
 #splash:not(.failed) img { animation: breathe 1.45s ease-in-out infinite alternate; }
 @keyframes breathe { from { opacity: .62; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) { #splash img { animation: none !important; } }
-dialog { width: min(92vw, 480px); max-height: 90dvh; background: #171e23; border: 1px solid #39463f; color: inherit; border-radius: 17px; padding: 27px; box-shadow: 0 24px 100px #000a; }
+dialog { width: min(92vw, 480px); max-height: 90dvh; background: #201622; border: 1px solid #513549; color: inherit; border-radius: 17px; padding: 27px; box-shadow: 0 24px 100px #000a; }
 dialog::backdrop { background: #060909bf; backdrop-filter: blur(8px); }
 dialog h2 { margin: 7px 0; font-size: 24px; }
-dialog p { color: #b7c4c9; margin: 12px 0; }
-a, #settings-status { color: #75f0b0; }
+dialog p { color: #d4c0cf; margin: 12px 0; }
+a, #settings-status { color: #ff3595; }
 label { display: block; margin-top: 15px; }
-input, button { border: 1px solid #39453f; border-radius: 8px; padding: 9px 12px; font: inherit; color: inherit; background: #232d32; }
+input, button { border: 1px solid #513549; border-radius: 8px; padding: 9px 12px; font: inherit; color: inherit; background: #302332; }
 input { display: block; width: 100%; margin: 4px 0 13px; }
 button { cursor: pointer; }
-button.primary { background: #75f0b0; color: #14291e; border-color: transparent; font-weight: 650; }
-button:focus-visible, input:focus-visible { outline: 2px solid #75f0b0; outline-offset: 2px; }
+button.primary { background: #ff3595; color: #220e19; border-color: transparent; font-weight: 650; }
+button:focus-visible, input:focus-visible { outline: 2px solid #ff3595; outline-offset: 2px; }
 .close-form { position: absolute; right: 14px; top: 14px; }
 .close { padding: 0 9px; background: transparent; font-size: 22px; }
 .fine { font-size: 13px; }

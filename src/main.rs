@@ -3,6 +3,7 @@
 mod app;
 #[cfg(not(target_os = "emscripten"))]
 mod desktop;
+mod effects;
 #[cfg(not(target_os = "emscripten"))]
 mod spotify;
 

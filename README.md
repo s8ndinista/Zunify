@@ -1,6 +1,8 @@
 # SpotiFe
 
-A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast). The interface is rendered by FerroUI and its WinUI theme, with pointer-tracked Reveal lighting on cards and tracks, composited shadows, and animated page entrances. The app opens to a demo library with original covers and six playable samples. No Spotify account is needed to try it.
+A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together pins, new music, and listening history. Collection has a light artwork grid and song list, while Now Playing pairs the current cover with related queue and history artwork.
+
+FerroUI renders the interface with native controls, pointer Reveal, compositor keyframes, and a SkSL/WGSL lighting effect. The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
 
 ## Run the native desktop app
 

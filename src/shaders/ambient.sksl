@@ -1,0 +1,17 @@
+uniform float2 layer_size;
+uniform float layer_scale;
+uniform float transport;
+
+half4 main(float2 coord) {
+    float2 uv = coord / max(layer_size, float2(1.0));
+    if (transport > 0.5) {
+        float2 d = (uv - float2(0.50, 1.0)) * float2(4.7, 1.55);
+        float edge = 1.0 - smoothstep(0.0, 1.0, dot(d, d));
+        float alpha = edge * edge * 0.63;
+        return half4(float3(0.98, 0.22, 0.09) * alpha, alpha);
+    }
+    float2 d = (uv - float2(0.50, 0.41)) * float2(2.05, 2.4);
+    float edge = 1.0 - smoothstep(0.0, 1.0, dot(d, d));
+    float alpha = edge * 0.58;
+    return half4(float3(0.22, 0.16, 0.21) * alpha, alpha);
+}
