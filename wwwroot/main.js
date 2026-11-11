@@ -555,7 +555,6 @@ try {
     spotify.enableBrowser().catch(() => {});
     setInterval(syncPlayback, 7000);
   }
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(() => {});
 } catch (error) {
   document.querySelector("#loading-message").textContent = error.message + " Reload the page to try again.";
   document.querySelector("#splash").classList.add("failed");

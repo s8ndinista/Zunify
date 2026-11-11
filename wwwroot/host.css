@@ -25,3 +25,5 @@ button:focus-visible, input:focus-visible { outline: 2px solid #ff3595; outline-
 .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .noscript { position: fixed; bottom: 10px; left: 20px; z-index: 6; }
+#app-update { position: fixed; z-index: 6; top: .75rem; right: .75rem; max-width: calc(100% - 1.5rem); padding: .5rem .65rem; background: #201622; border: 1px solid #513549; border-radius: 8px; }
+#app-update button { margin-left: .4rem; }
