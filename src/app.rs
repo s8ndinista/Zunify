@@ -834,7 +834,7 @@ fn build() {
 
 fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
     let compact_desktop = mobile && cfg!(not(target_os = "emscripten"));
-    let top = grid("7,*", if compact_desktop { "48,*" } else { "" });
+    let top = grid("7,*", "");
     let stripe = surface(ACCENT, 0.0, 0.0);
     let fill = LinearGradientBrush::new();
     fill.set_end_point(RelativePoint::new(0.0, 1.0, RelativeUnit::Relative));
@@ -933,26 +933,33 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
     }
     put(&g, if mobile { 1 } else { 2 }, 0, tools.upcast());
     #[cfg(target_os = "emscripten")]
-    put(&top, 1, 0, g.upcast());
+    let header = {
+        put(&top, 1, 0, g.upcast());
+        top.upcast()
+    };
     #[cfg(not(target_os = "emscripten"))]
-    {
+    let header = {
         let caption = surface("#00000000", 0.0, 0.0);
+        caption.set_child(top.clone());
+        UI.with(|ui| ui.borrow_mut().caption_area = Some(caption.downgrade()));
         if compact_desktop {
             search.set_margin(Thickness::new(7.0, 0.0, 28.0, 0.0));
-            caption.set_child(search.clone());
-            put(&top, 1, 1, g.upcast());
+            put(&top, 1, 0, search.clone().upcast());
+            let compact = grid("", "48,*");
+            put(&compact, 0, 0, caption.upcast());
+            put(&compact, 0, 1, g.upcast());
+            compact.upcast()
         } else {
-            caption.set_child(g);
+            put(&top, 1, 0, g.upcast());
+            caption.upcast()
         }
-        put(&top, 1, 0, caption.clone().upcast());
-        UI.with(|ui| ui.borrow_mut().caption_area = Some(caption.downgrade()));
-    }
+    };
     UI.with(|ui| {
         let mut ui = ui.borrow_mut();
         ui.search = Some(search);
         ui.nav = labels;
     });
-    top.upcast()
+    header
 }
 fn header(title: &str, detail: &str) -> Ref<Control> {
     let g = grid("*,Auto", "");
