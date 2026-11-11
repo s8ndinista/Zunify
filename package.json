@@ -11,6 +11,8 @@
     "test": "playwright test"
   },
   "devDependencies": {
-    "@playwright/test": "1.61.1"
+    "@playwright/test": "1.61.1",
+    "esbuild": "0.28.2",
+    "music-metadata": "12.4.0"
   }
 }

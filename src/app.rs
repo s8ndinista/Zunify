@@ -7,7 +7,7 @@ use ferroui_base::{
     WeakRef,
     data::{BindingMode, ReflectionBinding, TemplateBinding},
     ferro_class, ferro_impl_classes,
-    input::{InputElement, gesture_recognizers::ScrollGestureRecognizer},
+    input::{InputElement, NavigationMethod, gesture_recognizers::ScrollGestureRecognizer},
     instantiate,
     layout::{HorizontalAlignment as H, Orientation, VerticalAlignment as V},
     media::{
@@ -24,7 +24,7 @@ use ferroui_controls::chrome::WindowDecorationProperties;
 use ferroui_controls::{
     AppBuilder, Application, ApplicationImpl, ApplicationImplExt, Border, Button,
     ColumnDefinitions, ContentControl, ContextMenu, Control, Grid, Image, ItemsSource, MenuItem, NewApplication,
-    RepeatButton, RowDefinitions, ScrollViewer, Slider, StackPanel, TextBlock, TextBox, ToolTip,
+    RepeatButton, RowDefinitions, ScrollViewer, Slider, StackPanel, TextBlock, TextBox, ToolTip, WrapPanel,
     automation::AutomationProperties,
     media::{
         ApplicationTheme, RevealBackgroundBrush, RevealBorderBrush, RevealBrush, RevealBrushState,
@@ -96,13 +96,14 @@ pub(crate) struct Model {
     pub(crate) items: Vec<Item>,
     pub(crate) collections: Vec<Item>,
     pub(crate) queue: Vec<Item>,
-    pub(crate) pins: Vec<Item>,
+    pub(crate) liked_music: Vec<Item>,
     pub(crate) recent: Vec<Item>,
     pub(crate) current: Item,
     pub(crate) playing: bool,
     pub(crate) shuffle: bool,
     pub(crate) repeat: bool,
     pub(crate) volume: f64,
+    pub(crate) can_go_back: bool,
     #[cfg(not(target_os = "emscripten"))]
     pub(crate) connecting: bool,
     #[cfg(not(target_os = "emscripten"))]
@@ -120,6 +121,7 @@ struct Ui {
     main: Option<Ref<ScrollViewer>>,
     collection: Option<Rc<CollectionView>>,
     nav: Vec<(&'static str, Ref<TextBlock>)>,
+    back: Option<(Ref<Border>, (bool, bool))>,
     footer: Option<Ref<Border>>,
     chrome: Option<Ref<Border>>,
     #[cfg(not(target_os = "emscripten"))]
@@ -158,6 +160,26 @@ fn send(action: &str, data: &str) {
         move || crate::desktop::dispatch(&action, &data),
         DispatcherPriority::NORMAL,
     );
+}
+
+#[cfg(not(target_os = "emscripten"))]
+pub(crate) fn pick_music_folder(done: impl FnOnce(Result<Option<String>, String>) + 'static) -> Result<(), String> {
+    use ferroui_base::{platform::storage::{FolderPickerOpenOptions, IStorageItem}, threading::{Dispatcher, DispatcherPriority}};
+    use ferroui_controls::TopLevel;
+
+    let shell = UI.with(|ui| ui.borrow().shell.clone()).map(|shell| shell.upcast::<ferroui_base::Visual>());
+    let top = TopLevel::get_top_level(shell.as_deref()).ok_or("Could not open the folder picker.")?;
+    let provider = top.storage_provider();
+    let _ = Dispatcher::ui_thread().spawn_local_with_priority(async move {
+        let result = provider.open_folder_picker_async(FolderPickerOpenOptions::new())
+            .await.map_err(|_| "Could not open the folder picker.".to_owned())
+            .and_then(|folders| folders.into_iter().next().map(|folder| {
+                (folder.as_ref() as &dyn IStorageItem).try_get_local_path()
+                    .ok_or_else(|| "Choose a folder on this computer.".into())
+            }).transpose());
+        done(result);
+    }, DispatcherPriority::DEFAULT);
+    Ok(())
 }
 
 #[repr(C)]
@@ -224,10 +246,29 @@ impl ApplicationImpl for App {
             window.set_min_width(380.0);
             window.set_min_height(450.0);
             install_desktop_title_bar(&window, shell);
+            install_system_back(&window);
             crate::desktop::window_ready(&window);
             desktop.set_main_window(Some(window));
         }
         Self::parent_on_framework_initialization_completed(this);
+    }
+}
+
+fn install_system_back(top: &ferroui_controls::TopLevel) {
+    top.back_requested(|_, event| {
+        if UI.with(|ui| ui.borrow().model.can_go_back) {
+            event.set_handled(true);
+            send("back", "");
+        }
+    });
+}
+
+#[cfg(target_os = "emscripten")]
+#[wasm_bindgen(js_name = installBackNavigation)]
+pub fn install_back_navigation() {
+    let shell = UI.with(|ui| ui.borrow().shell.clone()).map(|shell| shell.upcast::<ferroui_base::Visual>());
+    if let Some(top) = ferroui_controls::TopLevel::get_top_level(shell.as_deref()) {
+        install_system_back(&top);
     }
 }
 
@@ -409,12 +450,12 @@ fn icon(name: &str, ink: &str, size: f64) -> Ref<Grid> {
             "M2 8 H6 L11 3 V19 L6 14 H2 Z M15 7 Q19 11 15 15 M18 4 Q25 11 18 18",
             false,
         ),
-        "pin" => ("M6 3 H16 M8 3 V9 L5 13 H17 L14 9 V3 M11 13 V21", false),
         "plus" => ("M11 3 V19 M3 11 H19", false),
         "up" => ("M5 14 L11 8 L17 14", false),
         "down" => ("M5 8 L11 14 L17 8", false),
         "remove" => ("M5 5 L17 17 M17 5 L5 17", false),
         "arrow" => ("M3 11 H19 M13 5 L19 11 L13 17", false),
+        "back" => ("M19 11 H3 M9 5 L3 11 L9 17", false),
         "external" => ("M12 3 H20 V11 M20 3 L9 14 M8 5 H3 V20 H18 V15", false),
         "music" => (
             "M8 16 V5 L19 3 V13 M8 16 A3 2 0 1 1 2 16 A3 2 0 1 1 8 16 M19 13 A3 2 0 1 1 13 13 A3 2 0 1 1 19 13",
@@ -500,31 +541,41 @@ fn action(name: &str, glyph: &str, ink: &str, code: &'static str, arg: &str) -> 
     b
 }
 fn reveal_actions(host: &Ref<Border>, controls: &[Ref<Control>]) {
-    if UI.with(|ui| ui.borrow().width < 790.0) {
-        return;
-    }
-    for control in controls {
-        control.set_opacity(0.0);
-    }
-    let controls = controls.iter().map(Ref::downgrade).collect::<Vec<_>>();
+    let controls = controls.iter()
+        .map(|control| (control.downgrade(), control.is_hit_test_visible()))
+        .collect::<Vec<_>>();
+    let keyboard_focus = Rc::new(Cell::new(false));
+    let focus = keyboard_focus.clone();
     let host_ref = host.downgrade();
-    host.add_property_changed_handler(Rc::new(move |change| {
-        let property = change.property();
-        if property != InputElement::is_pointer_over_property().as_property()
-            && property != InputElement::is_keyboard_focus_within_property().as_property()
-        {
-            return;
-        }
+    let update = Rc::new(move || {
         let Some(host) = host_ref.upgrade() else { return };
-        let opacity = if host.is_pointer_over() || host.is_keyboard_focus_within() {
-            1.0
-        } else {
-            0.0
-        };
-        for control in controls.iter().filter_map(WeakRef::upgrade) {
-            control.set_opacity(opacity);
+        let visible = host.is_pointer_over() || focus.get();
+        for (control, hit_test) in &controls {
+            if let Some(control) = control.upgrade() {
+                control.set_opacity(if visible { 1.0 } else { 0.0 });
+                if *hit_test {
+                    control.set_is_hit_test_visible(visible);
+                }
+            }
+        }
+    });
+    update();
+    let on_pointer = update.clone();
+    host.add_property_changed_handler(Rc::new(move |change| {
+        if change.property() == InputElement::is_pointer_over_property().as_property() {
+            on_pointer();
         }
     }));
+    let on_focus = update.clone();
+    let focus = keyboard_focus.clone();
+    host.add_handler(InputElement::got_focus_event(), move |_, event| {
+        focus.set(matches!(event.navigation_method, NavigationMethod::Tab | NavigationMethod::Directional));
+        on_focus();
+    });
+    host.add_handler(InputElement::lost_focus_event(), move |_, _| {
+        keyboard_focus.set(false);
+        update();
+    });
 }
 
 fn collection_actions(item: &Item) -> Option<Ref<Border>> {
@@ -532,21 +583,18 @@ fn collection_actions(item: &Item) -> Option<Ref<Border>> {
         return None;
     }
     let buttons = row(2.0);
-    let play = action(
-        &format!("Play {}", item.title), "play", "#F8F4F7", "play", &item.id,
-    );
-    play.set_width(30.0);
-    play.set_height(30.0);
-    ToolTip::set_tip(&play, Some(Rc::new("Play".to_owned())));
-    buttons.children().add(play.upcast::<Control>());
-    if queueable_collection(item) {
-        let add = action(
-            &format!("Add {} to queue", item.title), "plus", "#F8F4F7", "enqueue", &item.id,
-        );
-        add.set_width(30.0);
-        add.set_height(30.0);
-        ToolTip::set_tip(&add, Some(Rc::new("Add to queue".to_owned())));
-        buttons.children().add(add.upcast::<Control>());
+    let actions = [(format!("Play {}", item.title), "Play", "play", "play"),
+        (format!("Add {} to queue", item.title), "Add to queue", "plus", "enqueue")];
+    let count = if queueable_collection(item) { 2 } else { 1 };
+    for (name, tip, glyph, code) in actions.into_iter().take(count) {
+        let button = action(&name, glyph, "#FFFFFF", code, &item.id);
+        button.set_width(30.0);
+        button.set_height(30.0);
+        for (key, ink) in [("ButtonBackgroundPointerOver", "#49364A"), ("ButtonBackgroundPressed", "#62364F")] {
+            button.resources().set(key, Some(Rc::new(brush(ink))));
+        }
+        ToolTip::set_tip(&button, Some(Rc::new(tip.to_owned())));
+        buttons.children().add(button.upcast::<Control>());
     }
     let overlay = surface("#E01C1220", 0.0, 0.0);
     overlay.set_child(buttons);
@@ -912,6 +960,14 @@ fn build() {
     refresh(true, true, true);
 }
 
+fn back_button(width: f64, enabled: bool) -> Ref<Button> {
+    let back = action("Back", "back", if enabled { TEXT } else { MUTED }, "back", "");
+    back.set_width(width);
+    back.set_is_enabled(enabled);
+    ToolTip::set_tip(&back, Some(Rc::new("Back".to_owned())));
+    back
+}
+
 fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
     let compact_desktop = mobile && cfg!(not(target_os = "emscripten"));
     let top = grid("7,*", "");
@@ -939,6 +995,11 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
     ));
     let navigation = row(if mobile { 0.0 } else { 5.0 });
     center(&navigation);
+    let back = surface("Transparent", 0.0, 0.0);
+    center(&back);
+    back.set_width(if mobile { 26.0 } else { 32.0 });
+    back.set_child(back_button(back.width(), model.can_go_back));
+    navigation.children().add(back.clone().upcast::<Control>());
     let mut labels = Vec::new();
     for (title, accessible, route) in [
         ("QUICKPLAY", "Quickplay", "home"),
@@ -1038,6 +1099,7 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
         let mut ui = ui.borrow_mut();
         ui.search = Some(search);
         ui.nav = labels;
+        ui.back = Some((back, (LIGHT_PAGE.get(), model.can_go_back)));
     });
     header
 }
@@ -1111,18 +1173,18 @@ fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         if mobile { "" } else { "1*,2.15*,1.7*" },
         if mobile { "Auto,Auto,Auto" } else { "" },
     );
-    let pins = stack(8.0);
-    pins.children()
-        .add(metro_title("pins", 42.0).upcast::<Control>());
-    if m.pins.is_empty() {
-        let note = label("Pin a playlist from your collection.", 12.0, MUTED);
+    let liked = stack(8.0);
+    liked.children()
+        .add(metro_title("liked songs", 42.0).upcast::<Control>());
+    if m.liked_music.is_empty() {
+        let note = label("Songs you like appear here.", 12.0, MUTED);
         note.set_text_wrapping(TextWrapping::Wrap);
-        pins.children().add(note.upcast::<Control>());
-        let b = pill("Your collection", "arrow", false, "navigate", "library");
-        b.set_horizontal_alignment(H::Left);
-        pins.children().add(b.upcast::<Control>());
+        liked.children().add(note.upcast::<Control>());
     } else {
-        pins.children().add(tile_rows(&m.pins, 2, tiles * 0.74));
+        liked.children().add(tile_rows(&m.liked_music, 2, tiles * 0.74));
+        let b = pill("All liked songs", "heart", false, "navigate", "liked");
+        b.set_horizontal_alignment(H::Left);
+        liked.children().add(b.upcast::<Control>());
     }
     let new_music = stack(8.0);
     new_music
@@ -1163,7 +1225,7 @@ fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
             tiles * 0.73,
         ));
     }
-    for (index, section) in [pins, new_music, history].into_iter().enumerate() {
+    for (index, section) in [liked, new_music, history].into_iter().enumerate() {
         let frame = surface("Transparent", 0.0, 0.0);
         frame.set_margin(Thickness::new(
             0.0,
@@ -1202,15 +1264,6 @@ fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         }
         mixes.children().add(line.upcast::<Control>());
         content.children().add(mixes.upcast::<Control>());
-    } else if m.collections.is_empty() && !m.items.is_empty() {
-        let tracks = stack(3.0);
-        tracks
-            .children()
-            .add(metro_title("liked songs", 30.0).upcast::<Control>());
-        for (index, item) in m.items.iter().take(6).enumerate() {
-            tracks.children().add(track(item, index, false));
-        }
-        content.children().add(tracks.upcast::<Control>());
     }
     if !m.status.is_empty() {
         let message = label(&m.status, 13.0, ACCENT);
@@ -1368,7 +1421,7 @@ fn track_row(item: &Item, index: usize, compact: bool, editable_queue: Option<us
     let artwork = grid("", "");
     put(&artwork, 0, 0, image.upcast());
     let play_glyph = surface("#B5161018", 0.0, 0.0);
-    play_glyph.set_child(icon("play", "#F8F4F7", 14.0));
+    play_glyph.set_child(icon("play", "#FFFFFF", 14.0));
     play_glyph.set_is_hit_test_visible(false);
     put(&artwork, 0, 0, play_glyph.clone().upcast());
     put(&r, col, 0, artwork.upcast());
@@ -1604,15 +1657,8 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
                     .upcast::<Control>(),
                 );
             }
-            if !m.detail.starts_with("section:") {
-                let name = if m.pins.iter().any(|item| item.id == m.detail) {
-                    "Unpin from Quickplay"
-                } else {
-                    "Pin to Quickplay"
-                };
-                actions
-                    .children()
-                    .add(pill(name, "pin", false, "pin", &m.detail).upcast::<Control>());
+            if m.detail.starts_with("local:album:") && m.items.iter().all(|item| item.art.is_empty()) {
+                actions.children().add(pill("Find cover art", "search", false, "local-cover", &m.detail).upcast::<Control>());
             }
             page.children().add(actions.upcast::<Control>());
         }
@@ -1628,15 +1674,7 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         .filter(|i| matches!(i.kind.as_str(), "album" | "artist" | "playlist"))
         .cloned()
         .collect::<Vec<_>>();
-    if !cards.is_empty() {
-        page.children().add(collection_cards(&cards, cols));
-    }
-    page.children().add(track_list(
-        m.items
-            .iter()
-            .filter(|item| item.kind.is_empty() || item.kind == "track"),
-        false,
-    ));
+    let tracks = m.items.iter().filter(|item| item.kind.is_empty() || item.kind == "track");
     let frame = surface(
         if LIGHT_PAGE.get() {
             "#FCFAFC"
@@ -1646,11 +1684,40 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         0.0,
         0.0,
     );
-    frame.set_child(page);
+    if bounded_catalog(&m.page) {
+        #[derive(PartialEq)]
+        enum Row { Cards(Vec<Item>), Track(usize, Item) }
+        let rows = cards.chunks(cols).map(|chunk| Row::Cards(chunk.to_vec()))
+            .chain(tracks.cloned().enumerate().map(|(index, item)| Row::Track(index, item)));
+        let list = virtual_list(rows, 2.0, move |row| match row {
+            Row::Cards(items) => collection_card_row(items, cols),
+            Row::Track(index, item) => track(item, *index, false),
+        });
+        let viewer = scroll();
+        viewer.set_is_scroll_chaining_enabled(false);
+        AutomationProperties::set_name(&viewer, Some("Music results"));
+        viewer.set_content(Some(Rc::new(list)));
+        page.set_margin(Thickness::default());
+        let layout = grid("", "Auto,*");
+        layout.set_margin(Thickness::uniform(if mobile { 12.0 } else { 20.0 }));
+        put(&layout, 0, 0, page.upcast());
+        put(&layout, 0, 1, viewer.upcast());
+        frame.set_child(layout);
+    } else {
+        if !cards.is_empty() {
+            page.children().add(collection_cards(&cards, cols));
+        }
+        page.children().add(track_list(tracks, false));
+        frame.set_child(page);
+    }
     if animate {
         effects::entrance(&frame, 20.0, 0);
     }
     frame.upcast()
+}
+
+fn bounded_catalog(page: &str) -> bool {
+    matches!(page, "detail" | "liked" | "search")
 }
 struct CollectionPane<T> {
     host: Ref<Grid>,
@@ -1700,10 +1767,12 @@ struct CollectionView {
     tabs: Vec<Ref<TextBlock>>,
     selected_artist: RefCell<Option<String>>,
     cols: usize,
+    local: bool,
 }
 
 impl CollectionView {
     fn new(m: &Model, width: f64, animate: bool) -> Self {
+        let local = m.page == "local";
         let compact = width < 790.0;
         let cols = if width >= 1360.0 {
             4
@@ -1719,7 +1788,7 @@ impl CollectionView {
 
         let heading = surface("Transparent", 0.0, 0.0);
         heading.set_horizontal_alignment(H::Left);
-        heading.set_child(metro_title("music", if compact { 34.0 } else { 44.0 }));
+        heading.set_child(metro_title(if local { "local music" } else { "music" }, if compact { 34.0 } else { 44.0 }));
         heading.set_margin(Thickness::new(
             0.0,
             0.0,
@@ -1731,11 +1800,17 @@ impl CollectionView {
         }
         put(&root, 0, 0, heading.upcast());
 
-        let filters = row(3.0);
-        filters
-            .children()
-            .add(pill("Liked songs", "heart", false, "navigate", "liked").upcast::<Control>());
-        if m.connected {
+        let filters = WrapPanel::new();
+        filters.set_item_spacing(3.0);
+        filters.set_line_spacing(3.0);
+        if local {
+            filters.children().add(pill("Choose music folder", "library", true, "import-folder", "").upcast::<Control>());
+            filters.children().add(pill("Collection", "library", false, "navigate", "library").upcast::<Control>());
+        } else {
+            filters.children().add(pill("Liked songs", "heart", false, "navigate", "liked").upcast::<Control>());
+            filters.children().add(pill("Local music", "library", false, "navigate", "local").upcast::<Control>());
+        }
+        if m.connected && !local {
             for (name, id) in [("Artists", "section:artists"), ("Albums", "section:albums")] {
                 filters
                     .children()
@@ -1751,11 +1826,11 @@ impl CollectionView {
         put(&root, 0, 1, filters.upcast());
 
         let artists = CollectionPane::new("ARTISTS", 1.0, artist_button);
-        let playlists = CollectionPane::new("PLAYLISTS", 8.0, move |chunk: &Vec<Item>| {
+        let playlists = CollectionPane::new(if local { "ALBUMS" } else { "PLAYLISTS" }, 8.0, move |chunk: &Vec<Item>| {
             collection_card_row(chunk, cols)
         });
         let songs = CollectionPane::new("SONGS", 2.0, |(index, item)| track(item, *index, false));
-        let playlist_empty = collection_empty(&playlists.host, "Your playlists appear here.");
+        let playlist_empty = collection_empty(&playlists.host, if local { "Tagged albums appear here." } else { "Your playlists appear here." });
         let song_empty = collection_empty(&songs.host, "No songs to show.");
 
         let catalog = grid(if compact { "" } else { "1.05*,2.1*,1.8*" }, "");
@@ -1763,7 +1838,7 @@ impl CollectionView {
         let tab_row = row(8.0);
         for (index, (name, pane)) in [
             ("Artists", &artists.host),
-            ("Playlists", &playlists.host),
+            (if local { "Albums" } else { "Playlists" }, &playlists.host),
             ("Songs", &songs.host),
         ]
         .into_iter()
@@ -1814,8 +1889,9 @@ impl CollectionView {
             tabs,
             selected_artist: RefCell::default(),
             cols,
+            local,
         };
-        view.show_pane(1);
+        view.show_pane(if local && m.collections.is_empty() { 2 } else { 1 });
         view
     }
 
@@ -1948,9 +2024,7 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     let mobile = width < 790.0;
     let stage = grid("", "");
     stage.set_clip_to_bounds(true);
-    if mobile {
-        stage.set_height(370.0);
-    } else {
+    if !mobile {
         let viewport = UI.with(|ui| {
             ui.borrow()
                 .body
@@ -2088,10 +2162,11 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         effects::entrance(&frame, 32.0, 0);
     }
     put(&stage, 0, 0, frame.upcast());
-    let p = stack(10.0);
+    let p = grid("", "Auto,*");
     let q = grid("*,Auto", "");
     put(&q, 0, 0, strong("Up next", 15.0, TEXT).upcast());
-    if !m.queue.is_empty() && !m.connected {
+    let editable_queue = !m.connected || m.current.id.starts_with("local:");
+    if !m.queue.is_empty() && editable_queue {
         put(&q, 1, 0, pill("Clear queue", "remove", false, "queue-clear", "").upcast());
     } else if !m.queue.is_empty() {
         put(
@@ -2101,27 +2176,28 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
             kicker(&format!("{:02} TRACKS", m.queue.len()), DIM).upcast(),
         );
     }
-    p.children().add(q.upcast::<Control>());
+    q.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
+    put(&p, 0, 0, q.upcast());
     if m.queue.is_empty() {
-        p.children()
-            .add(label("Your queue is empty.", 12.0, DIM).upcast::<Control>());
-    }
-    let editable = (!m.connected).then_some(m.queue.len());
-    p.children().add(virtual_list(
-        m.queue.iter().cloned().enumerate(),
-        2.0,
-        move |(index, item)| track_row(item, *index, true, editable),
-    ));
-    let page = stack(0.0);
-    page.children().add(stage.clone().upcast::<Control>());
-    let queue = surface(if mobile { BG } else { "#D51B121D" }, 13.0, 0.0);
-    if mobile {
-        queue.set_child(p);
-        page.children().add(queue.upcast::<Control>());
+        put(&p, 0, 1, label("Your queue is empty.", 12.0, DIM).upcast());
     } else {
+        let editable = editable_queue.then_some(m.queue.len());
         let list = scroll();
-        list.set_content(Some(Rc::new(p.upcast::<Control>())));
-        queue.set_child(list);
+        list.set_is_scroll_chaining_enabled(false);
+        AutomationProperties::set_name(&list, Some("Up next tracks"));
+        list.set_content(Some(Rc::new(virtual_list(
+            m.queue.iter().cloned().enumerate(), 2.0,
+            move |(index, item)| track_row(item, *index, true, editable),
+        ))));
+        put(&p, 0, 1, list.upcast());
+    }
+    let page = grid("", if mobile { "3*,2*" } else { "*" });
+    put(&page, 0, 0, stage.clone().upcast());
+    let queue = surface(if mobile { BG } else { "#D51B121D" }, 13.0, 0.0);
+    queue.set_child(p);
+    if mobile {
+        put(&page, 0, 1, queue.upcast());
+    } else {
         queue.set_width((width * 0.27).clamp(255.0, 356.0));
         queue.set_max_height(316.0);
         queue.set_horizontal_alignment(H::Right);
@@ -2296,6 +2372,10 @@ fn player(m: &Model, width: f64, fire: Option<&effects::TransportFire>) -> Ref<C
     );
     toggle.set_width(36.0);
     toggle.set_height(36.0);
+    if !m.playing {
+        // The triangle's center of area sits left of its bounding-box center.
+        toggle.set_padding(Thickness::new(4.0, 0.0, 0.0, 0.0));
+    }
     toggle.set_corner_radius(CornerRadius::uniform(18.0));
     toggle.set_border_brush(Some(brush(MUTED)));
     toggle.set_border_thickness(Thickness::uniform(1.5));
@@ -2363,6 +2443,17 @@ fn refresh(body: bool, playback: bool, animate: bool) {
     let collection = is_collection(&m.page);
     if body {
         let _was_collection = LIGHT_PAGE.replace(collection);
+        // Recreate only this button when its state changes so browser accessibility
+        // publishes the enabled state as well as the new icon color.
+        let back = UI.with(|ui| {
+            let mut ui = ui.borrow_mut();
+            let (back, state) = ui.back.as_mut()?;
+            let next = (collection, m.can_go_back);
+            (std::mem::replace(state, next) != next).then(|| back.clone())
+        });
+        if let Some(back) = back {
+            back.set_child(back_button(back.width(), m.can_go_back));
+        }
         #[cfg(not(target_os = "emscripten"))]
         if _was_collection != collection && let Some(app) = Application::current() {
             app.resources()
@@ -2386,8 +2477,9 @@ fn refresh(body: bool, playback: bool, animate: bool) {
         if let Some(host) = host {
             UI.with(|ui| ui.borrow_mut().now_stage = None);
             host.set_background(Some(brush(BG)));
-            if m.page == "library" {
-                let existing = UI.with(|ui| ui.borrow().collection.clone());
+            if matches!(m.page.as_str(), "library" | "local") {
+                let existing = UI.with(|ui| ui.borrow().collection.clone())
+                    .filter(|view| view.local == (m.page == "local"));
                 let view = existing.unwrap_or_else(|| {
                     let view = Rc::new(CollectionView::new(&m, width, animate && !reduced));
                     UI.with(|ui| ui.borrow_mut().collection = Some(view.clone()));
@@ -2398,6 +2490,12 @@ fn refresh(body: bool, playback: bool, animate: bool) {
                     view
                 });
                 view.update(&m);
+            } else if bounded_catalog(&m.page) || m.page == "queue" {
+                UI.with(|ui| ui.borrow_mut().collection = None);
+                if let Some(main) = &main {
+                    main.set_content(None);
+                }
+                host.set_child(main_page(&m, width, animate && !reduced));
             } else if let Some(main) = main {
                 UI.with(|ui| ui.borrow_mut().collection = None);
                 let child = main.clone().upcast::<Control>();
@@ -2423,7 +2521,7 @@ fn refresh(body: bool, playback: bool, animate: bool) {
 }
 
 fn is_collection(page: &str) -> bool {
-    matches!(page, "library" | "liked" | "detail")
+    matches!(page, "library" | "local" | "liked" | "detail")
 }
 
 #[cfg(target_os = "emscripten")]
@@ -2473,7 +2571,7 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
         let body = body
             && (reset
                 || match model.page.as_str() {
-                    "library" => {
+                    "library" | "local" => {
                         previous.page != model.page
                             || previous.items != model.items
                             || previous.collections != model.collections
@@ -2483,7 +2581,7 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
                         previous.page != model.page
                             || previous.items != model.items
                             || previous.collections != model.collections
-                            || previous.pins != model.pins
+                            || previous.liked_music != model.liked_music
                             || previous.recent != model.recent
                             || previous.status != model.status
                     }
@@ -2533,6 +2631,13 @@ pub fn resize(width: f64) {
         build();
     }
 }
+
+#[cfg_attr(target_os = "emscripten", wasm_bindgen(js_name = setSearchText))]
+pub fn set_search_text(value: &str) {
+    if let Some(search) = UI.with(|ui| ui.borrow().search.clone()) {
+        search.set_text(Some(value));
+    }
+}
 #[cfg_attr(target_os = "emscripten", wasm_bindgen)]
 pub fn tick(position: f64) {
     let (bar, t) = UI.with(|ui| {
@@ -2563,7 +2668,13 @@ pub fn spectrum(samples: &[f32], rate: f64, listening: bool) {
 }
 #[cfg_attr(target_os = "emscripten", wasm_bindgen(js_name = setImage))]
 pub fn set_image(url: &str, bytes: &[u8]) {
-    if let Ok(bitmap) = Bitmap::from_stream(&mut Cursor::new(bytes)) {
+    let mut stream = Cursor::new(bytes);
+    let bitmap = if url.starts_with("local-cover:") {
+        Bitmap::decode_to_width(&mut stream, 320, ferroui_base::media::imaging::BitmapInterpolationMode::HighQuality)
+    } else {
+        Bitmap::from_stream(&mut stream)
+    };
+    if let Ok(bitmap) = bitmap {
         let bitmap = Rc::new(bitmap);
         let waiting = UI.with(|ui| {
             let mut ui = ui.borrow_mut();

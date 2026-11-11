@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test, expect } from "@playwright/test";
 
 const button = (page, name) => page.getByRole("button", { name, exact: true });
@@ -20,6 +22,117 @@ const boot = async page => {
   await expect(page.locator("#out canvas").first()).toBeVisible();
   await expect(page).toHaveTitle("Zunify · Your music");
 };
+
+function taggedWave(title, album = "Folder album", cover) {
+  const chunk = (name, bytes) => {
+    const header = Buffer.alloc(8);
+    header.write(name);
+    header.writeUInt32LE(bytes.length, 4);
+    return Buffer.concat([header, bytes, Buffer.alloc(bytes.length % 2)]);
+  };
+  const field = (name, value) => chunk(name, Buffer.from(value + "\0"));
+  const format = Buffer.alloc(16);
+  format.writeUInt16LE(1, 0);
+  format.writeUInt16LE(1, 2);
+  format.writeUInt32LE(8000, 4);
+  format.writeUInt32LE(16000, 8);
+  format.writeUInt16LE(2, 12);
+  format.writeUInt16LE(16, 14);
+  const embedded = [];
+  if (cover) {
+    const picture = Buffer.concat([Buffer.from([0]), Buffer.from("image/jpeg\0"), Buffer.from([3, 0]), cover]);
+    const frame = Buffer.alloc(10);
+    frame.write("APIC");
+    frame.writeUInt32BE(picture.length, 4);
+    const length = frame.length + picture.length;
+    const size = Buffer.from([length >>> 21, length >>> 14 & 127, length >>> 7 & 127, length & 127]);
+    const tag = Buffer.concat([Buffer.from("ID3"), Buffer.from([3, 0, 0]), size, frame, picture]);
+    embedded.push(chunk("ID3 ", tag));
+  }
+  return chunk("RIFF", Buffer.concat([
+    Buffer.from("WAVE"), chunk("fmt ", format), chunk("data", Buffer.alloc(32_000)),
+    chunk("LIST", Buffer.concat([Buffer.from("INFO"), field("INAM", title), field("IART", "Folder artist"), field("IPRD", album)])),
+    ...embedded,
+  ]));
+}
+
+test("imports a music folder, virtualizes its album tracks, and goes back", async ({ page }, info) => {
+  const folder = info.outputPath("test music");
+  const album = join(folder, "Album");
+  await mkdir(album, { recursive: true });
+  const secondAlbum = join(folder, "Missing cover");
+  await mkdir(secondAlbum);
+  await writeFile(join(secondAlbum, "01.wav"), taggedWave("Song without cover", "Missing cover"));
+  const embeddedAlbum = join(folder, "Embedded cover");
+  await mkdir(embeddedAlbum);
+  const embeddedCover = await readFile("wwwroot/art/mix-3.jpg");
+  await writeFile(join(embeddedAlbum, "01.wav"), taggedWave("Song with cover", "Embedded cover", embeddedCover));
+  await Promise.all(Array.from({ length: 80 }, (_, index) => {
+    const number = String(index + 1).padStart(2, "0");
+    return writeFile(join(album, number + ".wav"), taggedWave("Tagged track " + number));
+  }));
+  await writeFile(join(album, "cover.jpg"), await readFile("wwwroot/art/mix-1.jpg"));
+  await page.addInitScript(() => { window.showDirectoryPicker = undefined; });
+  await boot(page);
+  await press(page, "Your library");
+  await press(page, "Local music");
+  const picker = await button(page, "Choose music folder").boundingBox();
+  const chooser = page.waitForEvent("filechooser");
+  await page.mouse.click(picker.x + picker.width / 2, picker.y + picker.height / 2);
+  await (await chooser).setFiles(folder);
+  await expect(button(page, "Folder album")).toBeAttached();
+  await press(page, "Folder album");
+  const header = button(page, "Play all");
+  await expect(header).toBeAttached();
+  await expect(button(page, "Find cover art")).toHaveCount(0);
+  await expect(button(page, "Play Tagged track 01")).toBeAttached();
+  expect(await page.getByRole("button", { name: /^Play Tagged track/ }).count()).toBeLessThan(80);
+  const before = await header.boundingBox();
+  await page.mouse.move(600, 550);
+  await page.mouse.wheel(0, 1600);
+  await expect(button(page, "Play Tagged track 01")).toHaveCount(0);
+  expect((await header.boundingBox()).y).toBe(before.y);
+  await press(page, "Play all");
+  await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0);
+  await expect(page.locator("audio")).toHaveAttribute("src", /^blob:/);
+  await press(page, "Back");
+  await expect(button(page, "Choose music folder")).toBeAttached();
+  await page.goForward();
+  await expect(button(page, "Play all")).toBeAttached();
+  await page.evaluate(() => {
+    const dispatch = globalThis.spotifyFerroAction;
+    globalThis.ferroBackRequests = 0;
+    globalThis.spotifyFerroAction = (action, data) => {
+      if (action === "back") globalThis.ferroBackRequests++;
+      return dispatch(action, data);
+    };
+  });
+  await page.goBack();
+  await expect(button(page, "Choose music folder")).toBeAttached();
+  expect(await page.evaluate(() => globalThis.ferroBackRequests)).toBe(1);
+  await page.route("https://musicbrainz.org/ws/2/release-group?*", route => {
+    expect(new URL(route.request().url()).searchParams.get("query")).toContain('releasegroup:"Missing cover"');
+    return route.fulfill({ headers: { "access-control-allow-origin": "*" }, json: {
+      "release-groups": [{ id: "9162580e-5df4-32de-80cc-f45a8d8a9b1d", title: "Missing cover",
+        "artist-credit": [{ name: "Folder artist" }] }],
+    } });
+  });
+  await page.route("https://coverartarchive.org/release-group/**", route => route.fulfill({
+    headers: { "access-control-allow-origin": "*" }, path: "wwwroot/art/mix-2.jpg", contentType: "image/jpeg",
+  }));
+  await press(page, "Missing cover");
+  await press(page, "Find cover art");
+  await expect(button(page, "Find cover art")).toHaveCount(0);
+  await press(page, "Back");
+  await expect(button(page, "Choose music folder")).toBeAttached();
+  await press(page, "Embedded cover");
+  await expect(button(page, "Play Song with cover")).toBeAttached();
+  await expect(button(page, "Find cover art")).toHaveCount(0);
+  await press(page, "Back");
+  await expect(button(page, "Choose music folder")).toBeAttached();
+  await press(page, "Back");
+  await expect(button(page, "Local music")).toBeAttached();
+});
 test("plays a bundled mix and supports queueing, liking and mobile layout", async ({ page }) => {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -84,13 +197,14 @@ test("search accepts keyboard input and opens matching collections", async ({ pa
   await expect(button(page, "Play all")).toBeAttached();
   await press(page, "Play all");
   await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-3/);
-  await press(page, "Pin to Quickplay");
+  await press(page, "Play A Place Between");
+  await press(page, "Like current track");
   await press(page, "Quickplay");
-  await expect(button(page, "Weightless")).toHaveCount(2);
+  await expect(page.getByText("liked songs", { exact: true })).toBeAttached();
   await expect(page.getByText("history", { exact: true })).toBeAttached();
-  await expect(button(page, "Play Blue Hour")).toBeAttached();
+  await expect(button(page, "Play A Place Between").first()).toBeAttached();
   await boot(page);
-  await expect(button(page, "Weightless")).toHaveCount(2);
+  await expect(button(page, "Play A Place Between").first()).toBeAttached();
 
 });
 

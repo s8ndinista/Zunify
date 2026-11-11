@@ -1,4 +1,4 @@
-use crate::app::Item;
+use crate::{app::Item, spotify_player::SpotifyPlayer};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Deserialize;
 use serde_json::Value;
@@ -12,6 +12,7 @@ use url::Url;
 
 pub const REDIRECT: &str = "http://127.0.0.1:4176/spotify/callback";
 const SCOPE: &str = "user-library-read user-library-modify user-follow-read playlist-read-private playlist-read-collaborative user-read-playback-state user-modify-playback-state user-read-currently-playing";
+const PLAYBACK_SCOPE: &str = "streaming";
 const API: &str = "https://api.spotify.com/v1";
 const TOKEN_URL: &str = "https://accounts.spotify.com/api/token";
 
@@ -25,6 +26,8 @@ struct Token {
 }
 
 pub struct Session {
+    player: Option<SpotifyPlayer>,
+    playback_token: Option<(Token, Instant)>,
     agent: ureq::Agent,
     client_id: String,
     token: Token,
@@ -50,15 +53,43 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
     let server = Server::http("127.0.0.1:4176").map_err(
         |_| "Spotify sign-in needs port 4176. Close the other app using it and try again.",
     )?;
+    let agent = http_agent();
+    let token = authorize_token(&agent, &client_id, SCOPE, REDIRECT, server, || {
+        cancelled.load(Ordering::Relaxed)
+    })?;
+    Ok(Session {
+        player: None,
+        playback_token: None,
+        agent,
+        client_id,
+        expires: Instant::now() + Duration::from_secs(token.expires_in),
+        retry_after: Instant::now(),
+        token,
+    })
+}
+
+fn authorize_token(
+    agent: &ureq::Agent,
+    client_id: &str,
+    scope: &str,
+    redirect: &str,
+    server: Server,
+    cancelled: impl Fn() -> bool,
+) -> Result<Token> {
+    let callback = Url::parse(redirect).unwrap();
+    let authority = &callback[url::Position::BeforeHost..url::Position::AfterPort];
+    if cancelled() {
+        return Err("Spotify sign-in cancelled.".into());
+    }
     let state = random_token::<32>()?;
     let verifier = random_token::<64>()?;
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let mut login = Url::parse("https://accounts.spotify.com/authorize").unwrap();
     login.query_pairs_mut().extend_pairs([
-        ("client_id", client_id.as_str()),
+        ("client_id", client_id),
         ("response_type", "code"),
-        ("redirect_uri", REDIRECT),
-        ("scope", SCOPE),
+        ("redirect_uri", redirect),
+        ("scope", scope),
         ("state", &state),
         ("code_challenge_method", "S256"),
         ("code_challenge", &challenge),
@@ -66,9 +97,8 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
     open::that_detached(login.as_str())
         .map_err(|_| "Could not open Spotify sign-in in your browser.")?;
     let expires = Instant::now() + Duration::from_secs(180);
-    let callback = Url::parse(REDIRECT).unwrap();
     let code = loop {
-        if cancelled.load(Ordering::Relaxed) {
+        if cancelled() {
             return Err("Spotify sign-in cancelled.".into());
         }
         if Instant::now() >= expires {
@@ -81,7 +111,7 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
         let expected_host = request
             .headers()
             .iter()
-            .any(|header| header.field.equiv("Host") && header.value.as_str() == "127.0.0.1:4176");
+            .any(|header| header.field.equiv("Host") && header.value.as_str() == authority);
         if request.method() != &Method::Get || !expected_host {
             reply(
                 request,
@@ -117,24 +147,16 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
         }
     };
     drop(server);
-    let agent = http_agent();
-    let token = exchange(
-        &agent,
+    exchange(
+        agent,
         [
             ("grant_type", "authorization_code"),
             ("code", &code),
-            ("redirect_uri", REDIRECT),
-            ("client_id", &client_id),
+            ("redirect_uri", redirect),
+            ("client_id", client_id),
             ("code_verifier", &verifier),
         ],
-    )?;
-    Ok(Session {
-        agent,
-        client_id,
-        expires: Instant::now() + Duration::from_secs(token.expires_in),
-        retry_after: Instant::now(),
-        token,
-    })
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -204,6 +226,87 @@ pub enum Http {
 }
 
 impl Session {
+    pub(crate) fn local_playback_notice(&self) -> Option<&'static str> {
+        self.player.as_ref().and_then(SpotifyPlayer::playback_notice)
+    }
+
+    pub(crate) fn local_device(&self) -> Option<&str> {
+        self.player.as_ref().filter(|player| player.is_running()).map(SpotifyPlayer::device_id)
+    }
+
+    pub(crate) fn start_local_player(
+        &mut self,
+        volume: f64,
+        cancelled: impl Fn() -> bool,
+    ) -> Result<String> {
+        if let Some(device) = self.local_device() {
+            return Ok(device.to_owned());
+        }
+        self.player = None;
+        let access_token = self.local_access_token(&cancelled)?;
+        if cancelled() {
+            return Err("Spotify playback authorization cancelled.".into());
+        }
+        let player = SpotifyPlayer::connect(access_token, volume).inspect_err(|_| {
+            // Allow a fresh authorization after Spotify rejects the credential.
+            self.playback_token = None;
+        })?;
+        let id = player.device_id().to_owned();
+        let deadline = Instant::now() + Duration::from_secs(6);
+        loop {
+            if cancelled() {
+                return Err("Spotify playback authorization cancelled.".into());
+            }
+            let devices = self.get("/me/player/devices")?;
+            if devices["devices"].as_array().is_some_and(|devices| {
+                devices.iter().any(|device| device["id"].as_str() == Some(id.as_str()))
+            }) {
+                self.player = Some(player);
+                return Ok(id);
+            }
+            if !player.is_running() || Instant::now() >= deadline {
+                return Err("Spotify did not make Zunify available. Use the same Spotify account for sign-in and playback authorization.".into());
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
+    fn local_access_token(&mut self, cancelled: impl Fn() -> bool) -> Result<String> {
+        // Spotify's native login accepts credentials issued to the player client.
+        // The Web API authorization is tied to Zunify's developer app instead.
+        let client = librespot_core::SessionConfig::default().client_id;
+        if let Some((token, expiry)) = &mut self.playback_token {
+            if *expiry > Instant::now() + Duration::from_secs(30) {
+                return Ok(token.access_token.clone());
+            }
+            if let Some(refresh) = token.refresh_token.as_deref()
+                && let Ok(mut renewed) = exchange(
+                    &self.agent,
+                    [
+                        ("grant_type", "refresh_token"),
+                        ("refresh_token", refresh),
+                        ("client_id", &client),
+                    ],
+                )
+            {
+                renewed.refresh_token = renewed.refresh_token.or_else(|| token.refresh_token.take());
+                *expiry = Instant::now() + Duration::from_secs(renewed.expires_in);
+                *token = renewed;
+                return Ok(token.access_token.clone());
+            }
+        }
+        let server = Server::http("127.0.0.1:0")
+            .map_err(|_| "Could not open the Spotify playback authorization callback.")?;
+        let addr = server.server_addr().to_ip().expect("IPv4 loopback");
+        let redirect = format!("http://{addr}/login");
+        let token = authorize_token(&self.agent, &client, PLAYBACK_SCOPE, &redirect, server, cancelled)
+            .map_err(|error| format!("Could not authorize local Spotify playback. {error}"))?;
+        let access_token = token.access_token.clone();
+        let expires = Instant::now() + Duration::from_secs(token.expires_in);
+        self.playback_token = Some((token, expires));
+        Ok(access_token)
+    }
+
     fn refresh(&mut self) -> Result<()> {
         let refresh = self
             .token

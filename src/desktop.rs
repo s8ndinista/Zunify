@@ -1,9 +1,10 @@
 use crate::{
     app::{self, Item, Model},
     audio::Audio,
-    listen::Listener,
+    local_media::{self, Cover, Library},
     spectrum,
     spotify::{self, Http, Session, item, query, split_uri, str_field},
+    spotify_player::{LOCAL_DEVICE, is_playback_notice},
 };
 use ferroui_base::{
     Ref,
@@ -64,14 +65,16 @@ enum Update {
         warning: Option<String>,
     },
     View(Vec<Item>, String),
-    Playback(Value),
+    LocalCover(String, Vec<u8>),
+    Playback(Value, bool, Option<&'static str>),
     Queue(Vec<Item>),
     Enqueued(Vec<Item>, Option<String>),
     Liked(Item, bool),
-    StartedPlayback(String),
-    PlaybackNeedsDevice(Value),
+    StartedPlayback(String, bool),
+    PlaybackNeedsDevice(Value, String),
     Device {
         id: String,
+        local: bool,
         started_playback: bool,
     },
     Command {
@@ -104,7 +107,7 @@ struct Network {
     generation: Arc<AtomicU64>,
     send: Sender<(Request, Job)>,
     updates: Receiver<(Request, spotify::Result<Update>)>,
-    art_requests: Sender<String>,
+    art_requests: Sender<(String, Option<Cover>)>,
     images: Receiver<(String, Vec<u8>)>,
 }
 
@@ -126,7 +129,7 @@ impl Network {
                 }
             }
         });
-        let (art_requests, art_work) = mpsc::channel::<String>();
+        let (art_requests, art_work) = mpsc::channel::<(String, Option<Cover>)>();
         let (art_results, images) = mpsc::channel();
         std::thread::spawn(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
@@ -134,8 +137,11 @@ impl Network {
                 .max_redirects(0)
                 .build()
                 .into();
-            for url in art_work {
-                let bytes = spotify::artwork(&agent, &url).unwrap_or_default();
+            for (url, local) in art_work {
+                let bytes = match local {
+                    Some(cover) => cover.read(),
+                    None => spotify::artwork(&agent, &url),
+                }.unwrap_or_default();
                 if art_results.send((url, bytes)).is_err() {
                     break;
                 }
@@ -151,32 +157,22 @@ impl Network {
     }
 }
 
-fn pin_path() -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    let config = std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join("Library/Application Support"));
-    #[cfg(target_os = "windows")]
-    let config = std::env::var_os("APPDATA").map(PathBuf::from);
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let config = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    config.map(|dir| dir.join("SpotiFe").join("quickplay-pins.json"))
-}
-
 struct Desktop {
     model: Model,
     demo: Demo,
     demo_liked: HashSet<String>,
-    demo_pins: Vec<String>,
     liked: HashSet<String>,
     known: HashMap<String, Item>,
     history: Vec<Item>,
     upcoming: VecDeque<Item>,
     order: Vec<Item>,
     audio: Option<Audio>,
-    // Hears Spotify playing on this computer, which the app itself cannot decode.
-    listener: Option<Listener>,
+    files: Library,
+    file_playback: bool,
+    folder_version: u64,
+    importing: bool,
+    folder_result: Option<Receiver<Result<Library, String>>>,
+    cover_requested_at: Option<Instant>,
     network: Network,
     requested_art: HashSet<String>,
     selected_device: String,
@@ -184,6 +180,8 @@ struct Desktop {
     pending_play: Option<Value>,
     generation: u64,
     page_version: u64,
+    back_stack: VecDeque<(String, String, String)>,
+    page_query: String,
     sign_in: Option<Arc<AtomicBool>>,
     last_poll: Instant,
     poll_pending: bool,
@@ -205,16 +203,6 @@ impl Desktop {
     fn new() -> Self {
         let demo: Demo = serde_json::from_str(include_str!("../wwwroot/demo-library.json"))
             .expect("bundled demo library is valid");
-        let demo_pins = pin_path()
-            .and_then(|path| std::fs::read(path).ok())
-            .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
-            .unwrap_or_else(|| {
-                demo.mixes
-                    .iter()
-                    .take(2)
-                    .map(|mix| mix.item.id.clone())
-                    .collect()
-            });
         let mut state = Self {
             model: Model {
                 volume: 65.0,
@@ -222,7 +210,6 @@ impl Desktop {
                 ..Model::default()
             },
             demo,
-            demo_pins,
             demo_liked: ["demo:1".to_owned(), "demo:3".to_owned()].into(),
             liked: HashSet::new(),
             known: HashMap::new(),
@@ -230,7 +217,12 @@ impl Desktop {
             upcoming: VecDeque::new(),
             order: Vec::new(),
             audio: None,
-            listener: None,
+            files: Library::default(),
+            file_playback: false,
+            folder_version: 0,
+            importing: false,
+            folder_result: None,
+            cover_requested_at: None,
             network: Network::new(),
             requested_art: HashSet::new(),
             selected_device: String::new(),
@@ -238,6 +230,8 @@ impl Desktop {
             pending_play: None,
             generation: 0,
             page_version: 0,
+            back_stack: VecDeque::new(),
+            page_query: String::new(),
             sign_in: None,
             last_poll: Instant::now(),
             poll_pending: false,
@@ -256,8 +250,13 @@ impl Desktop {
 
     fn reset_demo(&mut self) {
         self.known.clear();
+        self.remember_local_files();
+        self.file_playback = false;
         self.liked.clone_from(&self.demo_liked);
         self.model.page = "home".into();
+        self.back_stack.clear();
+        self.page_query.clear();
+        self.model.can_go_back = false;
         self.model.query.clear();
         self.model.detail.clear();
         self.model.status.clear();
@@ -271,12 +270,6 @@ impl Desktop {
                 .chain(&self.model.collections)
                 .map(|item| (item.id.clone(), item.clone())),
         );
-        self.model.pins = self
-            .demo_pins
-            .iter()
-            .filter_map(|id| self.known.get(id).cloned())
-            .take(6)
-            .collect();
         self.model.recent.clear();
         self.model.current = self.demo.tracks[0].clone();
         self.order = self.demo.tracks.clone();
@@ -288,7 +281,6 @@ impl Desktop {
         self.model.repeat = false;
         self.model.shuffle = false;
         self.position = 0.0;
-        self.listener = None;
         spectrum::set_listening(true);
         self.audio = None;
         self.history.clear();
@@ -299,6 +291,12 @@ impl Desktop {
 
     fn display_model(&self) -> Model {
         let mut model = self.model.clone();
+        if model.page == "home" {
+            model.liked_music = self.saved_tracks().into_iter().take(6).collect();
+        }
+        if model.page == "local" {
+            model.collections.clone_from(&self.files.albums);
+        }
         for item in model
             .items
             .iter_mut()
@@ -334,6 +332,113 @@ impl Desktop {
     fn remember(&mut self, items: &[Item]) {
         self.known
             .extend(items.iter().map(|item| (item.id.clone(), item.clone())));
+    }
+
+    fn remember_local_files(&mut self) {
+        self.known.extend(self.files.tracks.iter().chain(&self.files.albums)
+            .map(|item| (item.id.clone(), item.clone())));
+    }
+
+    fn import_folder(&mut self) {
+        if self.importing {
+            return;
+        }
+        self.importing = true;
+        self.folder_version += 1;
+        let version = self.folder_version;
+        if let Err(error) = app::pick_music_folder(move |result| STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            match result {
+                Ok(Some(path)) => {
+                    let (sender, receiver) = mpsc::channel();
+                    state.folder_result = Some(receiver);
+                    if state.model.page == "local" {
+                        state.status("Reading music folder…");
+                    }
+                    std::thread::spawn(move || {
+                        let _ = sender.send(local_media::scan(&PathBuf::from(path), version));
+                    });
+                }
+                Ok(None) => state.importing = false,
+                Err(error) => { state.importing = false; state.status(error); }
+            }
+        })) {
+            self.importing = false;
+            self.status(error);
+        }
+    }
+
+    fn finish_import(&mut self, result: Result<Library, String>) {
+        self.importing = false;
+        self.folder_result = None;
+        let files = match result {
+            Ok(files) if !files.tracks.is_empty() => files,
+            Ok(_) => { self.status("No supported audio files were found in that folder."); return; }
+            Err(error) => { self.status(error); return; }
+        };
+        if self.file_playback {
+            self.audio = None;
+            self.model.playing = false;
+            self.model.current = Item::default();
+            self.model.queue.clear();
+            self.position = 0.0;
+            self.file_playback = false;
+        }
+        self.upcoming.retain(|track| !track.id.starts_with("local:"));
+        self.model.queue.retain(|track| !track.id.starts_with("local:"));
+        self.history.retain(|track| !track.id.starts_with("local:"));
+        self.order.retain(|track| !track.id.starts_with("local:"));
+        self.model.recent.retain(|track| !track.id.starts_with("local:"));
+        self.known.retain(|id, _| !id.starts_with("local:"));
+        self.liked.retain(|id| !id.starts_with("local:"));
+        self.files = files;
+        self.remember_local_files();
+        if self.model.page == "local" || self.model.detail.starts_with("local:") {
+            self.navigate("local", "");
+            if self.files.unreadable > 0 {
+                self.status(format!("Imported {} tracks. Some entries could not be read.", self.files.tracks.len()));
+            }
+        }
+        self.render(false, true, false);
+    }
+
+    fn find_local_cover(&mut self, id: &str) {
+        let Some(album) = self.files.albums.iter().find(|album| album.id == id).cloned() else { return };
+        if !album.art.is_empty() { return; }
+        if album.artist.is_empty() {
+            self.status("Add an album artist tag to look up this cover.");
+            return;
+        }
+        if self.cover_requested_at.is_some_and(|time| time.elapsed() < Duration::from_secs(1)) { return; }
+        self.cover_requested_at = Some(Instant::now());
+        self.status("Looking up cover art in MusicBrainz…");
+        self.request(Some(self.page_version), false, false, Box::new(move |_| {
+            let bytes = local_media::find_cover(&album)?;
+            Ok(Update::LocalCover(album.id, bytes))
+        }));
+    }
+
+    fn set_local_cover(&mut self, id: &str, bytes: Vec<u8>) {
+        let Some(album) = self.files.albums.iter_mut().find(|album| album.id == id) else { return };
+        let Some(tracks) = self.files.album_tracks.get_mut(id) else { return };
+        let art = format!("local-cover:{id}");
+        album.art.clone_from(&art);
+        self.known.insert(id.to_owned(), album.clone());
+        let track_ids: HashSet<_> = tracks.iter().map(|track| track.id.clone()).collect();
+        let update = |track: &mut Item| {
+            if track_ids.contains(&track.id) { track.art.clone_from(&art); }
+        };
+        for track in tracks.iter_mut().chain(&mut self.files.tracks).chain(&mut self.model.items)
+            .chain(&mut self.model.queue).chain(&mut self.model.recent).chain(&mut self.order)
+            .chain(&mut self.history).chain(&mut self.upcoming).chain(std::iter::once(&mut self.model.current)) {
+            update(track);
+        }
+        for track_id in track_ids.iter() {
+            if let Some(track) = self.known.get_mut(track_id) { update(track); }
+        }
+        self.files.covers.insert(art, Cover::Downloaded(bytes.into()));
+        self.model.status.clear();
+        self.render(true, true, false);
     }
 
     fn request(&self, page: Option<u64>, silent: bool, playback_poll: bool, job: Job) {
@@ -437,17 +542,39 @@ impl Desktop {
     }
 
     fn navigate(&mut self, page: &str, id: &str) {
+        if self.model.page != page || self.model.detail != id {
+            if self.back_stack.len() == 64 { self.back_stack.pop_front(); }
+            self.back_stack.push_back((self.model.page.clone(), self.model.detail.clone(), self.page_query.clone()));
+        }
+        self.show_page(page, id);
+    }
+
+    fn go_back(&mut self) {
+        let Some((page, id, query)) = self.back_stack.pop_back() else { return };
+        self.model.query = query;
+        if id.starts_with("local:") && !self.known.contains_key(&id) {
+            self.show_page("local", "");
+        } else {
+            self.show_page(&page, &id);
+        }
+        app::set_search_text(&self.model.query);
+    }
+
+    fn show_page(&mut self, page: &str, id: &str) {
         self.search_at = None;
         if page != "devices" {
             self.pending_play = None;
         }
         self.page_version += 1;
+        self.page_query.clone_from(&self.model.query);
+        self.model.can_go_back = !self.back_stack.is_empty();
         self.model.page = page.into();
         self.model.detail = id.into();
         self.model.title = match page {
             "home" => "Quickplay",
             "search" => "Browse",
             "library" => "Collection",
+            "local" => "Local music",
             "liked" => "Liked songs",
             "devices" => "Playback devices",
             "detail" => self
@@ -464,6 +591,7 @@ impl Desktop {
             "home" if self.model.connected => self.saved_tracks().into_iter().take(12).collect(),
             "home" => self.demo.tracks.clone(),
             "liked" => self.saved_tracks(),
+            "local" => self.files.tracks.clone(),
             "library" => {
                 let mut items = vec![section("liked", "Liked songs", "Saved tracks")];
                 if self.model.connected {
@@ -479,6 +607,7 @@ impl Desktop {
                 items
             }
             "search" if !self.model.connected => self.search_demo(),
+            "detail" if id.starts_with("local:") => self.files.album_tracks.get(id).cloned().unwrap_or_default(),
             "detail" if !self.model.connected => self
                 .demo
                 .mixes
@@ -493,6 +622,7 @@ impl Desktop {
             _ => Vec::new(),
         };
         match page {
+            "local" if self.files.tracks.is_empty() => self.model.status = "Choose a music folder to import your albums and tracks.".into(),
             "liked" if self.model.items.is_empty() => self.model.caption = "Tracks you save appear here.".into(),
             "search" if self.model.query.is_empty() => self.model.caption = "Search songs, artists, albums, or playlists.".into(),
             "search" if self.model.connected => self.model.caption = "Looking for music…".into(),
@@ -532,7 +662,7 @@ impl Desktop {
                     Ok(Update::View(results, caption.into()))
                 });
             }
-            "detail" => {
+            "detail" if !id.starts_with("local:") => {
                 let target = self.known.get(id).cloned();
                 if let Some(target) = target {
                     self.api(Some(version), false, false, move |session| {
@@ -543,26 +673,10 @@ impl Desktop {
             "devices" => {
                 self.api(Some(version), false, false, |session| {
                     let data = session.get("/me/player/devices")?;
-                    let devices = available_devices(&data)
-                        .map(|(id, device)| {
-                            let suffix = if device["is_active"].as_bool() == Some(true) {
-                                " · Active"
-                            } else {
-                                ""
-                            };
-                            Item {
-                                id: id.to_owned(),
-                                title: format!("{}{suffix}", device_name(device)),
-                                ..Item::default()
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    let caption = if devices.is_empty() {
-                        "Open Spotify on this computer or Zunify in your browser, then refresh."
-                    } else {
-                        "Choose a Spotify Connect device."
-                    };
-                    Ok(Update::View(devices, caption.into()))
+                    Ok(Update::View(
+                        playback_devices(&data, session.local_device()),
+                        "Choose a Spotify Connect device.".into(),
+                    ))
                 });
             }
             _ => {}
@@ -586,15 +700,25 @@ impl Desktop {
             .collect()
     }
 
-    fn local_play(&mut self, item: Item) -> spotify::Result<()> {
-        let bytes = demo_audio(&item.id)?;
+    fn local_play(&mut self, mut item: Item) -> spotify::Result<()> {
         if self.audio.is_none() {
             self.audio = Some(Audio::new()?);
         }
-        self.audio
-            .as_ref()
-            .unwrap()
-            .play(bytes, self.model.volume)?;
+        let audio = self.audio.as_ref().unwrap();
+        let imported = item.id.starts_with("local:");
+        if imported {
+            let path = self.files.files.get(&item.id).ok_or("This track is no longer in the selected folder.")?;
+            if let Some(duration) = audio.play_file(path, self.model.volume)? && item.duration == 0.0 {
+                item.duration = duration.as_secs_f64();
+            }
+            if !self.file_playback && self.model.connected && self.model.playing {
+                self.control("pause", Http::Put, &[], None);
+            }
+        } else {
+            audio.play(demo_audio(&item.id)?, self.model.volume)?;
+        }
+        self.file_playback = imported;
+        spectrum::set_listening(true);
         self.position = 0.0;
         self.model.playing = true;
         item.record_in(&mut self.model.recent);
@@ -619,6 +743,17 @@ impl Desktop {
                 .cloned()
         });
         let Some(target) = target else { return Ok(()) };
+        if target.id.starts_with("local:") {
+            if let Some(tracks) = self.files.album_tracks.get(&target.id).cloned() {
+                return self.play_file_list(tracks, None);
+            }
+            let tracks = if self.model.page == "detail" && self.model.detail.starts_with("local:") {
+                self.model.items.clone()
+            } else {
+                self.files.tracks.clone()
+            };
+            return self.play_file_list(tracks, Some(target));
+        }
         if self.model.connected {
             let list = if self.model.page == "queue" {
                 &self.model.queue
@@ -677,8 +812,20 @@ impl Desktop {
         Ok(())
     }
 
+    fn play_file_list(&mut self, tracks: Vec<Item>, target: Option<Item>) -> spotify::Result<()> {
+        let Some(target) = target.or_else(|| tracks.first().cloned()) else { return Ok(()) };
+        let start = tracks.iter().position(|track| track.id == target.id).unwrap_or(0);
+        self.local_play(target)?;
+        self.upcoming = tracks.iter().skip(start + 1).cloned().collect();
+        self.history = tracks[..start].to_vec();
+        self.order = tracks;
+        self.model.queue = self.upcoming.iter().cloned().collect();
+        self.render(false, true, false);
+        Ok(())
+    }
+
     fn next(&mut self, previous: bool, ended: bool) -> spotify::Result<()> {
-        if self.model.connected {
+        if self.model.connected && !self.file_playback {
             self.cancel_seek();
             self.control(
                 if previous { "previous" } else { "next" },
@@ -719,7 +866,7 @@ impl Desktop {
     }
 
     fn toggle(&mut self) -> spotify::Result<()> {
-        if self.model.connected {
+        if self.model.connected && !self.file_playback {
             if !self.model.playing && let Some(payload) = self.pending_play.take() {
                 self.start_playback(payload, false);
                 return Ok(());
@@ -749,14 +896,16 @@ impl Desktop {
                 audio.sink.pause();
             }
             self.render(false, true, false);
-        } else {
+        } else if !self.model.current.id.is_empty() {
             self.local_play(self.model.current.clone())?;
+        } else if self.model.page == "local" {
+            self.play("")?;
         }
         Ok(())
     }
 
     fn seek(&mut self, value: f64) -> spotify::Result<()> {
-        if self.model.connected {
+        if self.model.connected && !self.file_playback {
             if self.model.current.id.is_empty() || self.model.current.duration <= 0.0 {
                 return Ok(());
             }
@@ -794,24 +943,41 @@ impl Desktop {
     }
 
     fn start_playback(&mut self, payload: Value, resume: bool) {
+        if self.file_playback {
+            self.file_playback = false;
+            self.audio = None;
+            self.model.playing = false;
+            self.model.current = Item::default();
+            self.model.queue.clear();
+            self.render(false, true, false);
+        }
         self.cancel_seek();
         self.pending_play = None;
         let selected = self.selected_device.clone();
         let active = self.active_device.clone();
+        let volume = self.model.volume;
+        let local = selected.is_empty();
+        if local && active.is_empty() {
+            self.status("Starting Zunify playback. If Spotify opens, authorize with the same account.");
+        }
+        let generation = self.generation;
+        let current = self.network.generation.clone();
         self.api(None, false, false, move |session| {
-            let device = if selected.is_empty() {
-                let devices = session.get("/me/player/devices")?;
-                let Some(device) = default_playback_device(&devices) else {
-                    return Ok(Update::PlaybackNeedsDevice(payload));
-                };
-                device.to_owned()
+            let device = if local {
+                match session.start_local_player(volume, || current.load(Ordering::Acquire) != generation) {
+                    Ok(id) => id,
+                    Err(error) => return Ok(Update::PlaybackNeedsDevice(payload, error)),
+                }
             } else {
                 selected
             };
+            if current.load(Ordering::Acquire) != generation {
+                return Err("Spotify sign-in cancelled.".into());
+            }
             let params = query(&[("device_id", &device)]);
             let body = (!(resume && device == active)).then_some(payload);
             session.request(Http::Put, &format!("/me/player/play?{params}"), body)?;
-            Ok(Update::StartedPlayback(device))
+            Ok(Update::StartedPlayback(device, local))
         });
     }
 
@@ -838,7 +1004,9 @@ impl Desktop {
             return;
         };
         let add = !self.liked.contains(id);
-        if self.model.connected {
+        if id.starts_with("local:") {
+            self.apply_like(item, add);
+        } else if self.model.connected {
             let path = format!("/me/library?{}", query(&[("uris", id)]));
             self.api(None, false, false, move |session| {
                 session.request(if add { Http::Put } else { Http::Delete }, &path, None)?;
@@ -846,7 +1014,7 @@ impl Desktop {
             });
         } else {
             self.apply_like(item, add);
-            self.demo_liked.clone_from(&self.liked);
+            self.demo_liked = self.liked.iter().filter(|id| id.starts_with("demo:")).cloned().collect();
         }
     }
 
@@ -865,13 +1033,17 @@ impl Desktop {
     }
 
     fn poll_playback(&mut self) {
-        if self.poll_pending {
+        if self.poll_pending || self.file_playback {
             return;
         }
         self.last_poll = Instant::now();
         self.poll_pending = true;
         self.api(None, true, true, |session| {
-            session.get("/me/player").map(Update::Playback)
+            let data = session.get("/me/player")?;
+            let external = !str_field(&data["device"], "id").is_empty()
+                && session.local_device() != data["device"]["id"].as_str();
+            let notice = (!external).then(|| session.local_playback_notice()).flatten();
+            Ok(Update::Playback(data, external, notice))
         });
     }
 
@@ -891,6 +1063,16 @@ impl Desktop {
     }
 
     fn enqueue(&mut self, id: &str) {
+        if id.starts_with("local:") {
+            let tracks = self.files.album_tracks.get(id).cloned()
+                .or_else(|| self.known.get(id).cloned().map(|track| vec![track]));
+            if let Some(tracks) = tracks { self.enqueue_files(tracks); }
+            return;
+        }
+        if self.model.connected && self.file_playback {
+            self.status("Play a Spotify track to use its queue.");
+            return;
+        }
         if !self.model.connected {
             if let Some(mix) = self.demo.mixes.iter().find(|mix| mix.item.id == id) {
                 self.upcoming.extend(mix.tracks.iter().filter_map(|id| self.known.get(id).cloned()));
@@ -934,6 +1116,15 @@ impl Desktop {
             .cloned()
             .collect();
         let Some(first) = tracks.first().cloned() else { return Ok(()) };
+        if first.id.starts_with("local:") {
+            if play { return self.play_file_list(tracks, None); }
+            self.enqueue_files(tracks);
+            return Ok(());
+        }
+        if !play && self.model.connected && self.file_playback {
+            self.status("Play a Spotify track to use its queue.");
+            return Ok(());
+        }
         match (play, self.model.connected) {
             (true, true) => self.start_playback(playback_payload(&first, &tracks, None), false),
             (true, false) => {
@@ -955,6 +1146,16 @@ impl Desktop {
             }
         }
         Ok(())
+    }
+
+    fn enqueue_files(&mut self, tracks: Vec<Item>) {
+        if !self.file_playback && self.model.connected {
+            self.status("Play a local track to start a local queue.");
+            return;
+        }
+        self.upcoming.extend(tracks);
+        self.model.queue = self.upcoming.iter().cloned().collect();
+        self.render(false, true, false);
     }
 
     fn edit_queue(&mut self, action: &str, entry: &str) -> spotify::Result<()> {
@@ -986,6 +1187,9 @@ impl Desktop {
     fn action(&mut self, action: &str, value: &str) -> spotify::Result<()> {
         match action {
             "art" => self.load_art(value),
+            "import-folder" => self.import_folder(),
+            "local-cover" => self.find_local_cover(value),
+            "back" => self.go_back(),
             "settings" => {
                 self.navigate("account", "");
                 if !self.model.connected
@@ -1015,31 +1219,6 @@ impl Desktop {
             }
             "open" if value == "section:liked" => self.navigate("liked", ""),
             "open" => self.navigate("detail", value),
-            "pin" => {
-                if let Some(index) = self.model.pins.iter().position(|item| item.id == value) {
-                    self.model.pins.remove(index);
-                } else if let Some(item) = self.known.get(value) {
-                    if self.model.pins.len() >= 6 {
-                        self.status("Quickplay holds six pins. Remove one to make room.");
-                        return Ok(());
-                    }
-                    self.model.pins.push(item.clone());
-                }
-                if !self.model.connected {
-                    self.demo_pins = self.model.pins.iter().map(|item| item.id.clone()).collect();
-                    if let Some(path) = pin_path()
-                        && let Some(parent) = path.parent()
-                        && std::fs::create_dir_all(parent).is_ok()
-                        && let Ok(bytes) = serde_json::to_vec(&self.demo_pins)
-                    {
-                        let temporary = path.with_extension("new");
-                        if std::fs::write(&temporary, bytes).is_ok() {
-                            let _ = std::fs::rename(temporary, path);
-                        }
-                    }
-                }
-                self.render(true, false, false);
-            }
             "play" => self.play(value)?,
             "toggle" => self.toggle()?,
             "next" => self.next(false, false)?,
@@ -1049,24 +1228,39 @@ impl Desktop {
             "artist-play" => self.artist_action(value, true)?,
             "artist-enqueue" => self.artist_action(value, false)?,
             "queue-play" | "queue-up" | "queue-down" | "queue-remove" | "queue-clear"
-                if !self.model.connected =>
+                if !self.model.connected || self.file_playback =>
             {
                 self.edit_queue(action, value)?;
             }
             "devices" => self.navigate("devices", ""),
             "transfer" if self.model.connected => {
+                if self.file_playback {
+                    self.status("Play a Spotify track before switching Spotify devices.");
+                    return Ok(());
+                }
                 self.cancel_seek();
                 let device = value.to_owned();
-                let started_playback = self.pending_play.is_some();
-                let (path, body) = device_selection_request(
-                    &device,
-                    self.pending_play.clone(),
-                    self.model.playing,
-                );
+                let pending = self.pending_play.clone();
+                let playing = self.model.playing;
+                let volume = self.model.volume;
+                if device == LOCAL_DEVICE && self.active_device.is_empty() {
+                    self.status("Starting Zunify playback. If Spotify opens, authorize with the same account.");
+                }
+                let generation = self.generation;
+                let current = self.network.generation.clone();
                 self.api(None, false, false, move |session| {
+                    let local = device == LOCAL_DEVICE;
+                    let cancelled = || current.load(Ordering::Acquire) != generation;
+                    let device = if local { session.start_local_player(volume, cancelled)? } else { device };
+                    if cancelled() {
+                        return Err("Spotify playback authorization cancelled.".into());
+                    }
+                    let started_playback = pending.is_some();
+                    let (path, body) = device_selection_request(&device, pending, playing);
                     session.request(Http::Put, &path, Some(body))?;
                     Ok(Update::Device {
                         id: device,
+                        local,
                         started_playback,
                     })
                 });
@@ -1079,7 +1273,7 @@ impl Desktop {
             "volume" => {
                 if let Some(value) = number(value, 100.0) {
                     self.model.volume = value.round();
-                    if self.model.connected {
+                    if self.model.connected && !self.file_playback {
                         self.volume_at = Some(Instant::now() + Duration::from_millis(180));
                     } else if let Some(audio) = &self.audio {
                         audio.sink.set_volume((value / 100.0) as f32);
@@ -1088,7 +1282,7 @@ impl Desktop {
             }
             "shuffle" => {
                 self.model.shuffle = !self.model.shuffle;
-                if self.model.connected {
+                if self.model.connected && !self.file_playback {
                     self.control(
                         "shuffle",
                         Http::Put,
@@ -1100,7 +1294,7 @@ impl Desktop {
             }
             "repeat" => {
                 self.model.repeat = !self.model.repeat;
-                if self.model.connected {
+                if self.model.connected && !self.file_playback {
                     self.control(
                         "repeat",
                         Http::Put,
@@ -1132,7 +1326,7 @@ impl Desktop {
         if let Some(bytes) = bytes {
             app::set_image(url, bytes);
         } else if self.requested_art.insert(url.to_owned()) {
-            let _ = self.network.art_requests.send(url.to_owned());
+            let _ = self.network.art_requests.send((url.to_owned(), self.files.covers.get(url).cloned()));
         }
     }
 
@@ -1166,17 +1360,16 @@ impl Desktop {
                 self.model.connected = true;
                 self.model.current = Item::default();
                 self.model.collections.clear();
-                self.model.pins.clear();
                 self.model.recent.clear();
                 self.model.queue.clear();
                 self.model.playing = false;
                 self.position = 0.0;
                 self.known.clear();
+                self.remember_local_files();
                 self.liked.clear();
                 self.audio = None;
-                // Without the capture the fire falls back to its ambient glow.
-                self.listener = Listener::start().ok();
-                spectrum::set_listening(self.listener.is_some());
+                self.file_playback = false;
+                spectrum::set_listening(true);
                 self.navigate("home", "");
                 self.api(None, false, false, |session| {
                     let playlists = session.items("/me/playlists?limit=50", None);
@@ -1226,7 +1419,12 @@ impl Desktop {
                 self.model.caption = caption;
                 self.render(true, false, false);
             }
-            Update::Playback(data) => {
+            Update::LocalCover(id, bytes) => self.set_local_cover(&id, bytes),
+            Update::Playback(data, external, notice) => {
+                if self.file_playback { return; }
+                if !data["device"].is_null() {
+                    spectrum::set_listening(!external);
+                }
                 let track = item(&data["item"]);
                 let playing = data["is_playing"].as_bool().unwrap_or(false);
                 let changed_track = track
@@ -1291,11 +1489,19 @@ impl Desktop {
                 if changed {
                     self.render(false, true, false);
                 }
+                if let Some(notice) = notice {
+                    if self.model.status != notice {
+                        self.status(notice);
+                    }
+                } else if is_playback_notice(&self.model.status) {
+                    self.status("");
+                }
                 if changed_track {
                     self.fetch_queue();
                 }
             }
             Update::Queue(queue) => {
+                if self.file_playback { return; }
                 self.remember(&queue);
                 if queue.iter().map(|item| &item.id).ne(self
                     .model
@@ -1308,6 +1514,7 @@ impl Desktop {
                 }
             }
             Update::Enqueued(items, error) => {
+                if self.file_playback { return; }
                 if !items.is_empty() {
                     self.remember(&items);
                     self.model.queue.extend(items.iter().cloned());
@@ -1323,7 +1530,9 @@ impl Desktop {
                 }
             }
             Update::Liked(item, add) => self.apply_like(item, add),
-            Update::StartedPlayback(id) => {
+            Update::StartedPlayback(id, local) => {
+                if self.file_playback { return; }
+                spectrum::set_listening(local);
                 self.active_device = id;
                 self.pending_play = None;
                 self.status("");
@@ -1331,15 +1540,19 @@ impl Desktop {
                 self.poll_again_at = Some(Instant::now() + Duration::from_secs(1));
                 self.fetch_queue();
             }
-            Update::PlaybackNeedsDevice(payload) => {
+            Update::PlaybackNeedsDevice(payload, error) => {
+                if self.file_playback { return; }
                 self.pending_play = Some(payload);
-                self.status("Open Spotify on this computer or Zunify in your browser, then press Play again. Use Playback devices to choose another output.");
+                self.status(error);
             }
             Update::Device {
                 id,
+                local,
                 started_playback,
             } => {
-                self.selected_device = id;
+                spectrum::set_listening(local);
+                self.active_device.clone_from(&id);
+                self.selected_device = if local { String::new() } else { id };
                 if started_playback {
                     self.pending_play = None;
                     self.status("Playback sent to the selected device.");
@@ -1378,6 +1591,9 @@ impl Desktop {
     }
 
     fn clock(&mut self) {
+        if let Some(result) = self.folder_result.as_ref().and_then(|receiver| receiver.try_recv().ok()) {
+            self.finish_import(result);
+        }
         while let Ok((request, update)) = self.network.updates.try_recv() {
             self.update(request, update);
         }
@@ -1396,7 +1612,7 @@ impl Desktop {
                 "",
             );
         }
-        if self.model.connected {
+        if self.model.connected && !self.file_playback {
             if !self.poll_pending
                 && (self.last_poll.elapsed() >= Duration::from_secs(5)
                     || self.poll_again_at.is_some_and(|at| at <= now))
@@ -1555,31 +1771,28 @@ fn available_devices(data: &Value) -> impl Iterator<Item = (&str, &Value)> {
 
 fn device_name(device: &Value) -> &str {
     match str_field(device, "name") {
-        "SpotiFe" => "Zunify",
+        "SpotiFe" | "Zunify" => "Zunify (browser)",
         name => name,
     }
 }
 
-fn default_playback_device(data: &Value) -> Option<&str> {
-    available_devices(data)
-        .filter_map(|(id, device)| {
-            let active = device["is_active"].as_bool() == Some(true);
-            let priority = match str_field(device, "name") {
-                "Zunify" => (2, active),
-                "SpotiFe" => (1, active),
-                _ if active => (0, true),
-                _ => return None,
-            };
-            Some((id, priority))
-        })
-        .max_by_key(|&(_, priority)| priority)
-        .map(|(id, _)| id)
-        .or_else(|| {
-            let mut computers = available_devices(data)
-                .filter(|(_, device)| str_field(device, "type").eq_ignore_ascii_case("computer"));
-            let (id, _) = computers.next()?;
-            computers.next().is_none().then_some(id)
-        })
+fn playback_devices(data: &Value, local: Option<&str>) -> Vec<Item> {
+    let active = |device: &Value| device["is_active"].as_bool() == Some(true);
+    let local_active = available_devices(data).any(|(id, device)| Some(id) == local && active(device));
+    let mut devices = vec![Item {
+        id: LOCAL_DEVICE.into(),
+        title: if local_active { "Zunify · Active" } else { "Zunify" }.into(),
+        ..Item::default()
+    }];
+    devices.extend(available_devices(data).filter(|(id, _)| Some(*id) != local).map(|(id, device)| {
+        let suffix = if active(device) { " · Active" } else { "" };
+        Item {
+            id: id.to_owned(),
+            title: format!("{}{suffix}", device_name(device)),
+            ..Item::default()
+        }
+    }));
+    devices
 }
 
 fn device_selection_request(
@@ -1677,34 +1890,19 @@ mod tests {
     }
 
     #[test]
-    fn default_output_prefers_zunify_over_active_remote_playback() {
-        let mut devices = json!({"devices": [
-            {"id": "horizon", "name": "Horizon", "is_active": true},
-            {"id": "legacy", "name": "SpotiFe", "is_active": false},
-            {"id": "current", "name": "Zunify", "is_active": false}
+    fn the_native_player_is_listed_once_even_when_spotify_reports_it() {
+        let data = json!({"devices": [
+            {"id": "native", "name": "Zunify", "is_active": true},
+            {"id": "web", "name": "Zunify"},
+            {"id": "restricted", "is_restricted": true}
         ]});
-        assert_eq!(default_playback_device(&devices), Some("current"));
-        devices["devices"][2]["is_restricted"] = json!(true);
-        assert_eq!(default_playback_device(&devices), Some("legacy"));
-        devices["devices"][1]["id"] = Value::Null;
-        assert_eq!(default_playback_device(&devices), Some("horizon"));
-        devices["devices"][0]["is_active"] = json!(false);
-        assert_eq!(default_playback_device(&devices), None);
-    }
-
-    #[test]
-    fn an_idle_spotify_computer_is_used_when_it_is_the_only_computer() {
-        let mut devices = json!({"devices": [
-            {"id": "speaker", "type": "Speaker", "is_active": false},
-            {"id": "computer", "type": "Computer", "is_active": false},
-            {"id": "restricted", "type": "Computer", "is_restricted": true}
-        ]});
-        assert_eq!(default_playback_device(&devices), Some("computer"));
-        devices["devices"][2]["is_restricted"] = json!(false);
-        assert_eq!(default_playback_device(&devices), None);
-        devices["devices"][1]["is_restricted"] = json!(true);
-        devices["devices"][2]["is_restricted"] = json!(true);
-        assert_eq!(default_playback_device(&devices), None);
+        let devices = playback_devices(&data, Some("native"));
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].id, LOCAL_DEVICE);
+        assert_eq!(devices[0].title, "Zunify · Active");
+        assert_eq!(devices[1].id, "web");
+        assert_eq!(devices[1].title, "Zunify (browser)");
+        assert_eq!(playback_devices(&json!({}), None)[0].id, LOCAL_DEVICE);
     }
 }
 
@@ -1760,7 +1958,6 @@ pub fn window_ready(window: &Ref<Window>) {
                 if let Some(cancel) = state.sign_in.take() {
                     cancel.store(true, Ordering::Relaxed);
                 }
-                state.listener = None;
                 state.audio = None;
             });
         })

@@ -1,6 +1,6 @@
 # Zunify
 
-A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together pins, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
+A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together liked songs, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
 
 FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and moves at random where it has no way to listen. See [Spectrum](#spectrum). The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
 
@@ -11,7 +11,7 @@ git submodule update --init --recursive
 cargo run --locked
 ```
 
-FerroUI opens a native window and the demo plays through the system audio output. On macOS, run `scripts/bundle-macos.sh` to build a local [Zunify.app](dist-desktop/Zunify.app) bundle that opens from Finder. On Linux, install the ALSA development headers required by the audio backend.
+FerroUI opens a native window and the demo plays through the system audio output. On macOS, run `scripts/bundle-macos.sh` to build a size-optimized, stripped release of [Zunify.app](dist-desktop/Zunify.app) that opens from Finder. Pass `dev` to package a development build. On Linux, install the ALSA development headers required by the audio backend.
 
 ## Run in the browser
 
@@ -22,6 +22,7 @@ With Git, Node.js 22+, Python 3.10+, and Rustup installed:
 ```sh
 git submodule update --init --recursive
 vendor/FerroUI/scripts/browser/setup.sh "$PWD/.tools"
+npm ci
 npm run build
 npm run preview
 ```
@@ -48,17 +49,25 @@ To configure an existing browser build, run `npm run configure:browser` with `SP
 
 Spotify Development Mode supports up to five allowlisted accounts on a standard app. The publisher adds testers in the dashboard. Public access requires Spotify’s approval for Extended Quota Mode. Spotify Premium is required for playback. [Spotify quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes) · [Spotify Web Playback SDK](https://developer.spotify.com/documentation/web-playback-sdk)
 
-The native app opens the default browser for authorization and receives the callback locally. It prefers the Zunify browser player through Spotify Connect, then the active Spotify device, then a single available computer. If Spotify has no player ready, open Spotify on this computer or Zunify in your browser and press Play again. The browser build plays through the Zunify device by default. Open **Playback devices** to choose a different output.
+The native app opens the default browser when you connect your Spotify library. The first time you press **Play** in a signed-in desktop session, Spotify may open a second authorization page for the built-in [librespot](https://github.com/librespot-org/librespot) player. Use the same Spotify account for both. Once you approve access, you can close the browser tab; Zunify plays through the computer’s audio output. The browser build uses Spotify’s Web Playback SDK. Open **Playback devices** to choose a different output.
+
+Spotify may authorize the built-in player and still deny it the key needed to play audio. This is a [known librespot account compatibility issue](https://github.com/librespot-org/librespot/issues/1649). If Zunify reports that Spotify denied the audio key, choose another Spotify Connect output or use the browser build.
+
+## Local music
+
+Open **Collection → Local music → Choose music folder** to browse and play audio files from a selected folder. Zunify scans subfolders and reads tags and embedded covers. If there is no embedded cover, it checks for common image names such as `cover.jpg` and `folder.png`. MP3, FLAC, WAV, Ogg Vorbis and M4A are supported by the desktop player. Browser playback depends on the browser’s codecs. Choose the folder again in a new session.
+
+Use **Find cover art** on an album without a cover to send its title and artist to MusicBrainz and look up a cover in the [Cover Art Archive](https://musicbrainz.org/doc/Cover_Art_Archive). The cover is kept in the current session. The selected audio files and their tags are read on your device, and Zunify leaves the files as they are.
 
 ## Spectrum
 
-The fire follows the music when the app can hear it. Spotify’s streams are protected, so only Spotify’s own players can decode them. For Spotify the app listens to audio that is already playing.
+The fire follows the music when Zunify has access to the audio samples.
 
 - **Demo.** The app plays the demo itself and analyzes the samples on their way to the output, ahead of the volume control.
-- **Desktop, Spotify.** While you are signed in, the app records what the computer is playing and analyzes it. Play in the official Spotify app on the same computer. The recording stays in memory and is never stored or sent. macOS 14.6 or later asks once for permission to record system audio. Windows needs no permission. Linux needs a PulseAudio or PipeWire monitor source. The Windows and Linux paths are untested.
+- **Desktop, Spotify.** Zunify analyzes its own playback on the way to the audio output. Playback sent to another device uses the ambient animation.
 - **Browser, Spotify.** Open **Spotify settings** and choose **Show the spectrum for Spotify**, then share the tab with its audio when the browser asks. This needs a Chromium desktop browser, and the browser asks again on each visit.
 
-When the music goes quiet, the flames fall away. When the app has no way to listen, the fire moves at random and keeps no time with the music. That covers a computer whose output cannot be recorded and a browser tab whose audio is not shared. Music on another Spotify Connect device is silence to the app, so the fire stays dark for it.
+When the music goes quiet, the flames fall away. Playback on another Spotify Connect device or in a browser tab with unshared audio uses an ambient animation.
 
 ## Verify
 

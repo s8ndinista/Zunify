@@ -6,18 +6,27 @@ if [[ "$(uname -s)" != Darwin ]]; then
   echo 'Build the macOS app bundle on macOS.' >&2
   exit 1
 fi
-profile="${1:-dev}"
+profile="${1:-release}"
 case "$profile" in
-  dev) output=debug ;;
-  release) output=release ;;
+  dev)
+    output=debug
+    cargo build --locked --profile dev
+    ;;
+  release)
+    output=macos-dist
+    # The executable calls its native code directly and needs no public exports.
+    cargo rustc --locked --profile macos-dist --bin spotify-ferro -- -C link-arg=-Wl,-no_exported_symbols
+    ;;
   *) echo 'Usage: scripts/bundle-macos.sh [dev|release]' >&2; exit 1 ;;
 esac
 
-cargo build --locked --profile "$profile"
 target="${CARGO_TARGET_DIR:-target}"
 bundle="dist-desktop/Zunify.app"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "$target/$output/spotify-ferro" "$bundle/Contents/MacOS/zunify.new"
+if [[ "$profile" == release ]]; then
+  xcrun strip -u -r "$bundle/Contents/MacOS/zunify.new"
+fi
 mv -f "$bundle/Contents/MacOS/zunify.new" "$bundle/Contents/MacOS/zunify"
 
 icons="$target/Zunify.iconset"
@@ -44,7 +53,6 @@ cat > "$bundle/Contents/Info.plist" <<'PLIST'
   <key>CFBundleIconFile</key><string>Zunify.icns</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSAudioCaptureUsageDescription</key><string>Zunify listens to the music playing on this Mac to draw its spectrum. Nothing is recorded or sent.</string>
 </dict>
 </plist>
 PLIST

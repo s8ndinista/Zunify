@@ -118,11 +118,23 @@ impl Audio {
     pub(crate) fn play(&self, bytes: &'static [u8], volume: f64) -> Result<(), String> {
         let source = Decoder::try_from(Cursor::new(bytes))
             .map_err(|error| format!("Could not read demo audio: {error}"))?;
+        self.play_source(source, volume);
+        Ok(())
+    }
+
+    pub(crate) fn play_file(&self, path: &std::path::Path, volume: f64) -> Result<Option<Duration>, String> {
+        let file = std::fs::File::open(path).map_err(|_| "Could not open this track. Choose its folder again if it moved.")?;
+        let source = Decoder::try_from(file).map_err(|_| "This audio file could not be decoded.")?;
+        let duration = source.total_duration();
+        self.play_source(source, volume);
+        Ok(duration)
+    }
+
+    fn play_source(&self, source: impl Source + Send + 'static, volume: f64) {
         self.sink.clear();
         self.sink.set_volume((volume / 100.0) as f32);
         self.sink.append(Tap::new(source));
         self.sink.play();
-        Ok(())
     }
 }
 

@@ -15,6 +15,7 @@ out="${CARGO_TARGET_DIR:-target}/wasm32-unknown-emscripten/browser"
 rm -rf dist/snippets
 mkdir -p dist
 cp -R wwwroot/. dist/
+npm exec --offline -- esbuild wwwroot/local-media.js --bundle --platform=browser --format=esm --minify --outfile=dist/local-media.js
 cp "$browser"/dist/{ferroui.js,storage.js,ferroui-sw.js} dist/
 cp vendor/FerroUI/scripts/browser/threads/ferroui-loader.js dist/
 cp "$out/spotify-ferro.js" "$out/spotify_ferro.wasm" dist/

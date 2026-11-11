@@ -5,12 +5,14 @@ mod app;
 mod audio;
 #[cfg(not(target_os = "emscripten"))]
 mod desktop;
-mod effects;
 #[cfg(not(target_os = "emscripten"))]
-mod listen;
+mod local_media;
+mod effects;
 mod spectrum;
 #[cfg(not(target_os = "emscripten"))]
 mod spotify;
+#[cfg(not(target_os = "emscripten"))]
+mod spotify_player;
 
 #[cfg(not(target_os = "emscripten"))]
 fn main() -> std::process::ExitCode {
