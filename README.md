@@ -2,7 +2,7 @@
 
 A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together liked songs, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
 
-FerroUI renders the interface with virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and moves at random where it has no way to listen. See [Spectrum](#spectrum). The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
+The browser and desktop share a Rust interface built with FerroUI’s fluent declarative API. It uses virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and moves at random where it has no way to listen. See [Spectrum](#spectrum). The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
 
 ## Run the native desktop app
 
@@ -55,7 +55,7 @@ Spotify may authorize the built-in player and still deny it the key needed to pl
 
 ## Local music
 
-Open **Collection → Local music → Choose music folder** to browse and play audio files from a selected folder. Zunify scans subfolders and reads tags and embedded covers. If there is no embedded cover, it checks for common image names such as `cover.jpg` and `folder.png`. MP3, FLAC, WAV, Ogg Vorbis and M4A are supported by the desktop player. Browser playback depends on the browser’s codecs. Choose the folder again in a new session.
+Open **Collection → Local music → Choose music folder**, then select the folder itself. In the browser you can also drag the folder from Finder or your file manager onto the Local music page. Use drag and drop if the picker accepts only files. Zunify scans all subfolders and reads tags and embedded covers. If there is no embedded cover, it checks for common image names such as `cover.jpg` and `folder.png`. MP3, FLAC, WAV, Ogg Vorbis and M4A are supported by the desktop player. Browser playback depends on the browser’s codecs. If the browser asks to upload the folder, it is asking for permission to read the files; Zunify imports them locally. Choose the folder again in a new session.
 
 Use **Find cover art** on an album without a cover to send its title and artist to MusicBrainz and look up a cover in the [Cover Art Archive](https://musicbrainz.org/doc/Cover_Art_Archive). The cover is kept in the current session. The selected audio files and their tags are read on your device, and Zunify leaves the files as they are.
 

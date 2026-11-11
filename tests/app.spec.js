@@ -58,7 +58,7 @@ function taggedWave(title, album = "Folder album", cover) {
 
 test("imports a music folder, virtualizes its album tracks, and goes back", async ({ page }, info) => {
   const folder = info.outputPath("test music");
-  const album = join(folder, "Album");
+  const album = join(folder, "Artists", "Folder artist", "Album", "Disc 1");
   await mkdir(album, { recursive: true });
   const secondAlbum = join(folder, "Missing cover");
   await mkdir(secondAlbum);
@@ -79,7 +79,9 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
   const picker = await button(page, "Choose music folder").boundingBox();
   const chooser = page.waitForEvent("filechooser");
   await page.mouse.click(picker.x + picker.width / 2, picker.y + picker.height / 2);
-  await (await chooser).setFiles(folder);
+  const pickerInput = await chooser;
+  expect(await pickerInput.element().getAttribute("webkitdirectory")).not.toBeNull();
+  await pickerInput.setFiles(folder);
   await expect(button(page, "Folder album")).toBeAttached();
   await press(page, "Folder album");
   const header = button(page, "Play all");
@@ -133,6 +135,61 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
   await press(page, "Back");
   await expect(button(page, "Local music")).toBeAttached();
 });
+
+test("recovers from a file-only picker by importing a dropped folder recursively", async ({ page }) => {
+  await page.addInitScript(() => { window.showDirectoryPicker = undefined; });
+  await boot(page);
+  await press(page, "Your library");
+  await press(page, "Local music");
+
+  const picker = await button(page, "Choose music folder").boundingBox();
+  const chooser = page.waitForEvent("filechooser");
+  await page.mouse.click(picker.x + picker.width / 2, picker.y + picker.height / 2);
+  const input = (await chooser).element();
+  // Simulate a browser host that allows a single file even in directory mode.
+  await input.evaluate(element => {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File(["cover"], "cover.jpg"));
+    element.files = transfer.files;
+    element.dispatchEvent(new Event("change"));
+  });
+  await expect(page.locator("#announcement")).toHaveText(/did not receive a folder.*Drag the folder itself/);
+
+  // A broken host can also close its picker without delivering change or cancel.
+  const pendingChoice = page.waitForEvent("filechooser");
+  await page.mouse.click(picker.x + picker.width / 2, picker.y + picker.height / 2);
+  await pendingChoice;
+
+  const accepted = await page.locator("#out canvas").first().evaluate((canvas, buffers) => {
+    const file = (name, bytes) => ({
+      name, isFile: true, file: done => done(new File([Uint8Array.from(bytes)], name)),
+    });
+    const folder = (name, ...batches) => ({
+      name, isDirectory: true,
+      createReader() {
+        let index = 0;
+        return { readEntries: done => queueMicrotask(() => done(batches[index++] ?? [])) };
+      },
+    });
+    const music = folder("Music", [folder("Artist", [folder("Album",
+      [file("01.wav", buffers[0])], [file("02.WAV", buffers[1])])])]);
+    const transfer = new DataTransfer();
+    const item = transfer.items.add(new File([], "Music"));
+    Object.defineProperty(item.constructor.prototype, "webkitGetAsEntry", {
+      configurable: true, value() { return music; },
+    });
+    return !canvas.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
+  }, [
+    Array.from(taggedWave("First nested song", "Dropped album")),
+    Array.from(taggedWave("Second nested song", "Dropped album")),
+  ]);
+  expect(accepted).toBe(true);
+  await expect(page.locator("input[webkitdirectory]")).toHaveCount(0);
+  await press(page, "Dropped album");
+  await expect(button(page, "Play First nested song")).toBeAttached();
+  await expect(button(page, "Play Second nested song")).toBeAttached();
+});
+
 test("plays a bundled mix and supports queueing, liking and mobile layout", async ({ page }) => {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
@@ -230,6 +287,7 @@ test.describe("mocked Spotify integration", () => {
   test.use({ serviceWorkers: "block" });
   for (const mode of ["shared", "manual"]) {
     test(`Spotify signs in with PKCE using ${mode} configuration`, async ({ page, baseURL }) => {
+      test.setTimeout(180_000);
       const clientId = mode === "shared" ? "a".repeat(32) : "b".repeat(32);
       const redirectUri = baseURL;
       await page.route("**/spotify-config.js", route => route.fulfill({
@@ -264,7 +322,7 @@ test.describe("mocked Spotify integration", () => {
           constructor({name}){this.name=name;}
           listeners={}; addListener(n,cb){this.listeners[n]=cb;}
           connect(){window.mockSpotifyPlayer=this;queueMicrotask(()=>this.listeners.ready({device_id:"web-zunify"}));return Promise.resolve(true);}
-          disconnect(){}
+          disconnect(){${mode === "manual" ? 'throw new Error("SDK teardown failed");' : ""}}
           getCurrentState(){return Promise.resolve(window.mockPlaybackState ?? null);}
           seek(ms){window.mockSeekCalls.push(ms);return Promise.resolve();}
           // Stands in for the protected stream: a tone the page's own audio graph never sees.
@@ -510,6 +568,19 @@ test.describe("mocked Spotify integration", () => {
       await press(page, mode === "shared" ? "Spotify settings" : "Account");
       await button(page, "Sign out").click();
       await expect(button(page, "Play mix")).toBeAttached();
+      await expect(page.locator("#settings")).not.toBeVisible();
+      await expect(page.locator("#announcement")).toHaveText("Signed out of Spotify in Zunify.");
+      const signedOutButton = button(page, mode === "shared" ? "Spotify settings" : "Connect Spotify");
+      await expect(signedOutButton).toBeAttached();
+      expect(await page.evaluate(() => sessionStorage.getItem("spotifast.spotify.session"))).toBeNull();
+      await page.evaluate(track => {
+        window.mockSpotifyPlayer.listeners.player_state_changed({
+          track_window: { current_track: track }, paused: false, position: 0, duration: 100000,
+        });
+      }, raw);
+      await expect(button(page, "Open Now Playing")).not.toContainText(raw.name);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await expect(signedOutButton).toBeAttached();
     });
   }
 });

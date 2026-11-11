@@ -1,4 +1,4 @@
-use crate::spectrum;
+use crate::{spectrum, view::mount};
 use ferroui_base::{
     Rect, Ref, Visual, WeakRef,
     animation::{DoubleTransition, ITransition, Transitions},
@@ -17,6 +17,7 @@ use ferroui_base::{
     threading::{Dispatcher, DispatcherPriority},
 };
 use ferroui_controls::{Border, Grid, TopLevel, hosting::ElementCompositionPreview};
+use ferroui_view::prelude::{InputElementProps, LayoutableProps, VisualProps, border};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -51,13 +52,6 @@ pub(crate) fn light(host: &Border) {
 pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) -> WeakRef<Border> {
     const WIDTH: f64 = 350.0;
     const HEIGHT: f64 = 300.0;
-    let glow = Border::new();
-    glow.set_width(WIDTH);
-    glow.set_height(HEIGHT);
-    glow.set_horizontal_alignment(HorizontalAlignment::Left);
-    glow.set_vertical_alignment(VerticalAlignment::Top);
-    glow.set_is_hit_test_visible(false);
-    glow.set_opacity(0.0);
     let falloff = RadialGradientBrush::new();
     for (offset, alpha, r, g, b) in [
         (0.0, 42, 219, 37, 132),
@@ -71,7 +65,16 @@ pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) -> WeakRef<Bor
                 offset,
             ));
     }
-    glow.set_background(Some(falloff.into()));
+    let glow = mount(
+        border()
+            .width(WIDTH)
+            .height(HEIGHT)
+            .horizontal_alignment(HorizontalAlignment::Left)
+            .vertical_alignment(VerticalAlignment::Top)
+            .is_hit_test_visible(false)
+            .opacity(0.0)
+            .with(move |glow| glow.set_background(Some(falloff.clone().into()))),
+    );
 
     let shift = TranslateTransform::new();
     glow.set_render_transform(Some(shift.clone().into()));

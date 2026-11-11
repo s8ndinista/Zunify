@@ -348,3 +348,46 @@ pub(crate) fn scan(root: &Path, version: u64) -> Result<Library, String> {
     }
     Ok(library)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scans_music_across_nested_folders() {
+        struct TempFolder(PathBuf);
+        impl Drop for TempFolder {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let mut suffix = [0_u8; 8];
+        getrandom::fill(&mut suffix).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("zunify-music-{:x}", u64::from_ne_bytes(suffix)));
+        fs::create_dir(&path).unwrap();
+        let root = TempFolder(path);
+        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("wwwroot/audio/sample-1.wav");
+        let mut expected = Vec::new();
+        for relative in [
+            "Single.wav",
+            "Artist/Album/Disc 1/First.wav",
+            "Artist/Album/Disc 2/Second.wav",
+        ] {
+            let track = root.0.join(relative);
+            fs::create_dir_all(track.parent().unwrap()).unwrap();
+            fs::copy(&sample, &track).unwrap();
+            expected.push(track);
+        }
+        fs::write(root.0.join("Artist/notes.txt"), "not music").unwrap();
+        let library = scan(&root.0, 1).unwrap();
+        assert_eq!(library.tracks.len(), expected.len());
+        assert!(library.tracks.iter().all(|track| track.duration > 0.0));
+        assert!(
+            expected
+                .iter()
+                .all(|track| library.files.values().any(|found| found == track))
+        );
+    }
+}

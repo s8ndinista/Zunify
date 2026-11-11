@@ -87,8 +87,11 @@ export class Spotify {
     if (!force && this.session.expires > Date.now() + 30_000) return this.session.access_token;
     if (!this.session.refresh_token) throw new Error("Your session expired. Sign out and connect again.");
     const { clientId, refresh_token } = this.session;
-    this.refreshPromise ??= this.exchange({ client_id: clientId, refresh_token, grant_type: "refresh_token" })
-      .finally(() => { this.refreshPromise = undefined; });
+    if (!this.refreshPromise) {
+      const refresh = this.exchange({ client_id: clientId, refresh_token, grant_type: "refresh_token" })
+        .finally(() => { if (this.refreshPromise === refresh) this.refreshPromise = undefined; });
+      this.refreshPromise = refresh;
+    }
     await this.refreshPromise;
     return this.session.access_token;
   }
@@ -177,7 +180,12 @@ export class Spotify {
     if (generation !== this.generation) throw new Error("Spotify signed out.");
     const player = this.player = new window.Spotify.Player({
       name: PLAYER_NAME,
-      getOAuthToken: callback => this.token().then(callback).catch(this.error),
+      getOAuthToken: callback => {
+        if (generation !== this.generation) return;
+        this.token().then(token => {
+          if (generation === this.generation) callback(token);
+        }).catch(error => { if (generation === this.generation) this.error(error); });
+      },
       volume: 0.65,
     });
     await new Promise((resolve, reject) => {
@@ -185,7 +193,7 @@ export class Spotify {
       const fail = message => { clearTimeout(timeout); reject(new Error(message)); };
       player.addListener("ready", ({ device_id }) => {
         clearTimeout(timeout);
-        if (generation !== this.generation) return;
+        if (generation !== this.generation) return reject(new Error("Spotify signed out."));
         this.device = device_id;
         this.devicesChanged();
         resolve();
@@ -197,12 +205,16 @@ export class Spotify {
       });
       for (const event of ["initialization_error", "authentication_error", "account_error", "playback_error"]) {
         player.addListener(event, ({ message }) => {
-          this.error(new Error(message));
+          if (generation === this.generation) this.error(new Error(message));
           fail(message);
         });
       }
-      player.addListener("autoplay_failed", () => this.error(new Error("Playback was blocked. Press Play to start listening.")));
-      player.addListener("player_state_changed", state => { if (state) this.state(state); });
+      player.addListener("autoplay_failed", () => {
+        if (generation === this.generation) this.error(new Error("Playback was blocked. Press Play to start listening."));
+      });
+      player.addListener("player_state_changed", state => {
+        if (state && generation === this.generation) this.state(state);
+      });
       player.connect().then(ok => { if (!ok) fail("Spotify could not connect the browser player."); }, reject);
     });
     return player;
@@ -210,12 +222,14 @@ export class Spotify {
 
   signOut() {
     this.generation++;
-    this.player?.disconnect();
-    this.ready = this.player = this.session = undefined;
+    const player = this.player;
+    this.ready = this.player = this.session = this.refreshPromise = undefined;
     this.active = this.device = "";
     this.retryAfter = 0;
     sessionStorage.removeItem(key);
     sessionStorage.removeItem(pending);
+    // An SDK failure during teardown must not keep Zunify signed in.
+    try { player?.disconnect(); } catch { /* The app session has already been cleared. */ }
   }
 }
 

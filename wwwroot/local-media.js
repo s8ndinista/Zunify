@@ -4,6 +4,8 @@ const MAX_COVER = 12 * 1024 * 1024;
 const extensions = /\.(mp3|flac|wav|ogg|oga|m4a|mp4)$/i;
 const names = ["cover.jpg", "cover.jpeg", "cover.png", "folder.jpg", "folder.jpeg", "folder.png",
   "front.jpg", "front.jpeg", "front.png"];
+const relevant = name => extensions.test(name) || names.includes(name.toLowerCase());
+const folderRequired = () => new Error("Zunify did not receive a folder. Drag the folder itself from your file manager onto Local music.");
 const clean = value => typeof value === "string" ? value.trim() : "";
 const parent = path => path.slice(0, Math.max(path.lastIndexOf("/"), 0));
 const front = metadata => {
@@ -20,7 +22,7 @@ async function directoryFiles(directory, prefix = "") {
     for await (const handle of folder.values()) {
       const relative = path + handle.name;
       if (handle.kind === "directory") folders.push([handle, relative + "/"]);
-      else if (extensions.test(handle.name) || names.includes(handle.name.toLowerCase())) {
+      else if (relevant(handle.name)) {
         try { files.push({ file: await handle.getFile(), path: relative }); } catch { /* File disappeared during import. */ }
       }
     }
@@ -28,30 +30,79 @@ async function directoryFiles(directory, prefix = "") {
   return files;
 }
 
-export async function pickMusicFiles() {
+async function entryFiles(roots) {
+  const files = [];
+  const pending = roots.map(root => [root, root.name]);
+  while (pending.length) {
+    const [entry, path] = pending.pop();
+    if (entry.isDirectory) {
+      const reader = entry.createReader();
+      while (true) {
+        // Some browsers return only one batch per call.
+        const children = await new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+        if (!children.length) break;
+        for (const child of children) pending.push([child, path + "/" + child.name]);
+      }
+    } else if (entry.isFile && relevant(entry.name)) {
+      try {
+        const file = await new Promise((resolve, reject) => entry.file(resolve, reject));
+        files.push({ file, path });
+      } catch { /* A file can disappear during import. */ }
+    }
+  }
+  return files;
+}
+
+export async function droppedMusicFiles(transfer) {
+  // Read the directory entries while the browser is dispatching the drop event.
+  const directories = Array.from(transfer.items ?? [], item =>
+    (item.getAsEntry ?? item.webkitGetAsEntry)?.call(item)).filter(entry => entry?.isDirectory);
+  if (!directories.length) throw folderRequired();
+  return entryFiles(directories);
+}
+
+export async function pickMusicFiles(signal) {
   if (typeof window.showDirectoryPicker === "function") {
     let directory;
     try {
       directory = await window.showDirectoryPicker({ id: "zunify-music", mode: "read" });
     } catch (error) {
-      if (error.name === "AbortError") return null;
+      if (signal.aborted || error.name === "AbortError") return null;
       if (error.name !== "SecurityError" && error.name !== "NotSupportedError") throw error;
     }
+    if (signal.aborted) return null;
     if (directory) return directoryFiles(directory);
   }
-  return new Promise(resolve => {
-    const input = document.createElement("input");
-    input.type = "file";
-    input.webkitdirectory = true;
-    input.multiple = true;
+  const input = document.createElement("input");
+  input.type = "file";
+  if (!("webkitdirectory" in input)) {
+    throw folderRequired();
+  }
+  if (navigator.userActivation?.isActive === false) {
+    throw new Error("The browser blocked the picker. Drag the folder itself onto Local music, or click Choose music folder again.");
+  }
+  input.setAttribute("webkitdirectory", "");
+  input.multiple = true;
+  return new Promise((resolve, reject) => {
     input.hidden = true;
     document.body.append(input);
-    const done = files => { input.remove(); resolve(files); };
-    input.addEventListener("cancel", () => done(null), { once: true });
-    input.addEventListener("change", () => done([...input.files].map(file => ({
-      file, path: file.webkitRelativePath || file.name,
-    }))), { once: true });
-    input.click();
+    const close = () => {
+      input.remove();
+      signal.removeEventListener("abort", cancel);
+    };
+    const done = files => { close(); resolve(files); };
+    const cancel = () => done(null);
+    signal.addEventListener("abort", cancel, { once: true });
+    input.addEventListener("cancel", cancel, { once: true });
+    input.addEventListener("change", () => {
+      const directories = Array.from(input.webkitEntries ?? []).filter(entry => entry.isDirectory);
+      const files = Array.from(input.files).filter(file => file.webkitRelativePath);
+      if (directories.length) done(entryFiles(directories));
+      else if (files.length) done(files.map(file => ({ file, path: file.webkitRelativePath })));
+      else { close(); reject(folderRequired()); }
+    }, { once: true });
+    try { input.click(); }
+    catch (error) { close(); reject(error); }
   });
 }
 

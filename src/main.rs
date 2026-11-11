@@ -9,6 +9,7 @@ mod desktop;
 mod local_media;
 mod effects;
 mod spectrum;
+mod view;
 #[cfg(not(target_os = "emscripten"))]
 mod spotify;
 #[cfg(not(target_os = "emscripten"))]
