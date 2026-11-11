@@ -11,8 +11,8 @@ const press = async (page, name, n = 0) => {
   // Let FerroUI publish its updated accessibility tree before invoking another control.
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 };
-const boot = async (page, path = "/") => {
-  await page.goto(path, { waitUntil: "domcontentloaded" });
+const boot = async page => {
+  await page.goto("./", { waitUntil: "domcontentloaded" });
   await expect(page.locator("#splash")).toHaveCount(0, { timeout: 45_000 });
   await expect(page.locator("#out canvas").first()).toBeVisible();
   await expect(page).toHaveTitle("SpotiFe · Your music");
@@ -78,16 +78,7 @@ test.describe("mocked Spotify integration", () => {
   for (const mode of ["shared", "manual"]) {
     test(`Spotify signs in with PKCE using ${mode} configuration`, async ({ page, baseURL }) => {
       const clientId = mode === "shared" ? "a".repeat(32) : "b".repeat(32);
-      const sitePath = mode === "shared" ? "/Zunify/" : "/";
-      const redirectUri = new URL(sitePath, baseURL).href;
-      if (mode === "shared") {
-        await page.route(`${redirectUri}**`, async route => {
-          const requestUrl = new URL(route.request().url());
-          requestUrl.pathname = requestUrl.pathname.slice("/Zunify".length);
-          const response = await route.fetch({ url: requestUrl.href });
-          await route.fulfill({ response });
-        });
-      }
+      const redirectUri = baseURL;
       await page.route("**/spotify-config.js", route => route.fulfill({
         contentType: "application/javascript",
         body: `export const spotifyClientId = ${JSON.stringify(mode === "shared" ? clientId : "")};`,
@@ -138,7 +129,7 @@ test.describe("mocked Spotify integration", () => {
           return new Response(null, { status: 204 });
         };
       }, raw);
-      await boot(page, sitePath);
+      await boot(page);
       if (mode === "shared") {
         const connect = button(page, "Connect Spotify");
         await expect(connect).toBeAttached();

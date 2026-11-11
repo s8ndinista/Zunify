@@ -10,14 +10,15 @@ const mime = {
   ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg",
   ".webmanifest": "application/manifest+json", ".wav": "audio/wav", ".json": "application/json",
 };
-export async function serve(port = 4173) {
+export async function serve(port = 4173, basePath = "/") {
   const root = await realpath(dist).catch(() => { throw new Error("Build the app first: npm run build"); });
   const server = createServer(async (req, res) => {
     if (req.headers.host !== `127.0.0.1:${server.address().port}`) return res.writeHead(403).end();
     if (req.method !== "GET" && req.method !== "HEAD") return res.writeHead(405, { Allow: "GET, HEAD" }).end();
     try {
       const url = new URL(req.url, "http://127.0.0.1");
-      const path = decodeURIComponent(url.pathname);
+      if (!url.pathname.startsWith(basePath)) return res.writeHead(404).end("Not found");
+      const path = decodeURIComponent(url.pathname.slice(basePath.length - 1));
       if (path.split("/").some(part => part.startsWith("."))) return res.writeHead(404).end();
       const file = await realpath(resolve(root, "." + (path === "/" ? "/index.html" : path)));
       if (!file.startsWith(root + sep)) return res.writeHead(404).end();
@@ -54,7 +55,8 @@ export async function serve(port = 4173) {
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
-    const server = await serve(Number(process.env.PORT || 4173));
-    console.log(`SpotiFe: http://127.0.0.1:${server.address().port}/`);
+    const basePath = new URL(process.env.BASE_PATH || "/", "http://127.0.0.1").pathname.replace(/\/?$/, "/");
+    const server = await serve(Number(process.env.PORT || 4173), basePath);
+    console.log(`SpotiFe: http://127.0.0.1:${server.address().port}${basePath}`);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
