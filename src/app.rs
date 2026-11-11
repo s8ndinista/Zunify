@@ -2141,6 +2141,7 @@ impl CollectionView {
             "Albums and playlists appear here."
         }));
         self.playlist_empty.set_is_visible(cards.is_empty());
+        self.playlists.viewer.set_is_visible(!cards.is_empty());
         let album = cards
             .iter()
             .find(|item| album_id.as_ref() == Some(&item.id));
@@ -2162,8 +2163,9 @@ impl CollectionView {
         );
         self.playlists
             .update(cards.chunks(self.cols).map(<[Item]>::to_vec).collect());
-        self.song_empty
-            .set_is_visible(self.songs.items.borrow().is_empty());
+        let no_songs = self.songs.items.borrow().is_empty();
+        self.song_empty.set_is_visible(no_songs);
+        self.songs.viewer.set_is_visible(!no_songs);
 
         if *self.selected_artist.borrow() != selected {
             let previous = self.selected_artist.replace(selected.clone());
