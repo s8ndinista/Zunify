@@ -126,9 +126,15 @@ test.describe("mocked Spotify integration", () => {
       await page.addInitScript(({ raw, largeLibrary }) => {
         const fetchReal = window.fetch.bind(window);
         const saved = [{ track: raw }];
+        const playlists = [];
         if (largeLibrary) {
           for (let index = 1; index <= 76; index++) {
-            saved.push({ track: { ...raw, uri: "spotify:track:library" + index, name: "Library song " + index } });
+            saved.push({ track: { ...raw, uri: "spotify:track:library" + index, name: "Library song " + index,
+              artists: [{ name: "Library artist " + String(index).padStart(2, "0") }],
+            } });
+          }
+          for (let index = 1; index <= 48; index++) {
+            playlists.push({ uri: "spotify:playlist:library" + index, name: "Library playlist " + index });
           }
         }
         window.spotifyRequests = [];
@@ -141,7 +147,7 @@ test.describe("mocked Spotify integration", () => {
             body: options.body ? JSON.parse(options.body) : null,
           });
           if (url.pathname === "/v1/me/tracks") return Response.json({ items: saved });
-          if (url.pathname === "/v1/me/playlists") return Response.json({ items: [] });
+          if (url.pathname === "/v1/me/playlists") return Response.json({ items: playlists });
           return new Response(null, { status: 204 });
         };
       }, { raw, largeLibrary: mode === "shared" });
@@ -157,6 +163,7 @@ test.describe("mocked Spotify integration", () => {
       }
       await expect(button(page, "Account")).toBeAttached({ timeout: 45_000 });
       await expect.poll(() => page.evaluate(() => window.spotifyRequests.map(r => r.path))).toContain("/v1/me/tracks");
+      if (mode === "shared") await press(page, "Your library");
       await expect(button(page, "Play Test Song")).toBeAttached();
       await press(page, "Play Test Song");
       const request = path => page.evaluate(path => window.spotifyRequests.find(r => r.path === path), path);
@@ -169,14 +176,52 @@ test.describe("mocked Spotify integration", () => {
         method: "DELETE", params: { uris: "spotify:track:test" },
       });
       if (mode === "shared") {
-        await press(page, "Your library");
-        await expect(button(page, "Play Library song 1")).toBeAttached();
-        await expect(button(page, "Play Library song 76")).toHaveCount(0);
-        await page.mouse.move(1150, 450);
-        await page.mouse.wheel(0, 5200);
+        const panes = [
+          { x: 110, first: "Library artist 01", last: "Library artist 76" },
+          { x: 500, first: "Library playlist 1", last: "Library playlist 48" },
+          { x: 1150, first: "Play Library song 1", last: "Play Library song 76" },
+        ];
+        for (const { first, last } of panes) {
+          await expect(button(page, first)).toBeAttached();
+          await expect(button(page, last)).toHaveCount(0);
+        }
+        for (const [index, { x, last }] of panes.entries()) {
+          await page.mouse.move(x, 450);
+          await page.mouse.wheel(0, 6500);
+          await expect(button(page, last)).toBeAttached();
+          for (const [otherIndex, other] of panes.entries()) {
+            if (otherIndex > index) {
+              await expect(button(page, other.first)).toBeAttached();
+              await expect(button(page, other.last)).toHaveCount(0);
+            } else if (otherIndex < index) {
+              await expect(button(page, other.last)).toBeAttached();
+            }
+          }
+        }
+        for (const heading of ["ARTISTS", "PLAYLISTS", "SONGS"]) {
+          await expect(page.getByText(heading, { exact: true })).toBeAttached();
+        }
+
+        await press(page, "Library artist 76");
         await expect(button(page, "Play Library song 76")).toBeAttached();
+        await expect(button(page, "Play Library song 75")).toHaveCount(0);
+        await expect(button(page, "Library artist 76")).toBeAttached();
+        await expect(button(page, "Library playlist 48")).toBeAttached();
+
+        await page.setViewportSize({ width: 390, height: 780 });
+        await expect(button(page, "Show Playlists")).toBeAttached();
+        await expect(button(page, "Library playlist 1")).toBeAttached();
+        await expect(button(page, "Play Library song 76")).toHaveCount(0);
+        await page.mouse.move(150, 430);
+        await page.mouse.wheel(0, 6500);
+        await expect(button(page, "Library playlist 48")).toBeAttached();
+        await press(page, "Show Songs");
+        await expect(button(page, "Play Library song 76")).toBeAttached();
+        await expect(button(page, "Library playlist 48")).toHaveCount(0);
+        await press(page, "Show Playlists");
+        await expect(button(page, "Library playlist 48")).toBeAttached();
       }
-      await press(page, "Account");
+      await press(page, mode === "shared" ? "Spotify settings" : "Account");
       await button(page, "Sign out").click();
       await expect(button(page, "Play mix")).toBeAttached();
     });

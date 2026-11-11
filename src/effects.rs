@@ -1,6 +1,11 @@
 use ferroui_base::{
-    Rect, Ref, WeakRef,
+    Rect, Ref, Visual, WeakRef,
+    animation::{DoubleTransition, ITransition, Transitions},
+    input::{InputElement, PointerType},
+    interactivity::RoutingStrategies,
+    layout::{HorizontalAlignment, VerticalAlignment},
     media::{
+        Color, GradientStop, RadialGradientBrush, TranslateTransform,
         effects::{
             CustomEffect, EffectParameterValue, ImmutableCustomEffect, ShaderEffectDescription,
         },
@@ -10,7 +15,7 @@ use ferroui_base::{
     rendering::composition::{ICompositionObjectAnimations, animations::AnimationDelayBehavior},
     threading::{Dispatcher, DispatcherPriority},
 };
-use ferroui_controls::{Border, TopLevel, hosting::ElementCompositionPreview};
+use ferroui_controls::{Border, Grid, TopLevel, hosting::ElementCompositionPreview};
 use std::{cell::Cell, rc::Rc, time::Duration};
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -36,6 +41,65 @@ impl CustomEffect for AmbientLight {
 
 pub(crate) fn light(host: &Border) {
     host.set_effect(Some(ImmutableCustomEffect::new(AmbientLight).into()));
+}
+
+pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) {
+    const WIDTH: f64 = 350.0;
+    const HEIGHT: f64 = 300.0;
+    let glow = Border::new();
+    glow.set_width(WIDTH);
+    glow.set_height(HEIGHT);
+    glow.set_horizontal_alignment(HorizontalAlignment::Left);
+    glow.set_vertical_alignment(VerticalAlignment::Top);
+    glow.set_is_hit_test_visible(false);
+    glow.set_opacity(0.0);
+    let falloff = RadialGradientBrush::new();
+    for (offset, alpha, r, g, b) in [
+        (0.0, 42, 219, 37, 132),
+        (0.48, 18, 246, 59, 153),
+        (1.0, 0, 246, 59, 153),
+    ] {
+        falloff
+            .gradient_stops()
+            .add(GradientStop::with_color_and_offset(
+                Color::from_argb(alpha, r, g, b),
+                offset,
+            ));
+    }
+    glow.set_background(Some(falloff.into()));
+
+    let shift = TranslateTransform::new();
+    glow.set_render_transform(Some(shift.clone().into()));
+    let fade = DoubleTransition::new();
+    fade.set_property(Some(Visual::opacity_property().as_property()));
+    fade.set_duration(Duration::from_millis(160).into());
+    let fade: Rc<dyn ITransition> = fade.into();
+    glow.set_transitions(Some(Transitions::from_items([fade])));
+    backdrop.set_child(glow.clone());
+
+    let target = glow.downgrade();
+    let space = backdrop.downgrade();
+    region.add_handler_with(
+        &InputElement::pointer_moved_event(),
+        move |_, event| {
+            if event.pointer().type_() != PointerType::Touch
+                && let (Some(glow), Some(space)) = (target.upgrade(), space.upgrade())
+            {
+                let at = event.get_position(Some(&space));
+                shift.set_x(at.x - WIDTH / 2.0);
+                shift.set_y(at.y - HEIGHT / 2.0);
+                glow.set_opacity(1.0);
+            }
+        },
+        RoutingStrategies::TUNNEL,
+        true,
+    );
+    let target = glow.downgrade();
+    region.add_handler(InputElement::pointer_exited_event(), move |_, _| {
+        if let Some(glow) = target.upgrade() {
+            glow.set_opacity(0.0);
+        }
+    });
 }
 
 // FerroUI transports each Rect as a float4 with no colour conversion.

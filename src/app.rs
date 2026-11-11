@@ -104,7 +104,9 @@ struct Ui {
     width: f64,
     reduced: bool,
     shell: Option<Ref<Border>>,
+    body: Option<Ref<Border>>,
     main: Option<Ref<ScrollViewer>>,
+    collection: Option<Rc<CollectionView>>,
     nav: Vec<(&'static str, Ref<TextBlock>)>,
     footer: Option<Ref<Border>>,
     chrome: Option<Ref<Border>>,
@@ -401,12 +403,13 @@ fn pill(name: &str, glyph: &str, primary: bool, code: &'static str, arg: &str) -
     b
 }
 fn reveal(b: &Ref<Border>) {
+    let light = LIGHT_PAGE.get();
     let fill = RevealBackgroundBrush::new();
-    fill.set_color(color("#06FF3595"));
+    fill.set_color(color(if light { "#09FF3595" } else { "#06FF3595" }));
     fill.set_fallback_color(color("Transparent"));
     fill.set_target_theme(ApplicationTheme::Dark);
     let edge = RevealBorderBrush::new();
-    edge.set_color(color("#1CFF3595"));
+    edge.set_color(color(if light { "#22FF3595" } else { "#1CFF3595" }));
     edge.set_fallback_color(color("Transparent"));
     edge.set_target_theme(ApplicationTheme::Dark);
     b.set_background(Some(fill.into()));
@@ -491,7 +494,9 @@ fn build() {
     root.set_clip_to_bounds(true);
 
     let main = scroll();
-    main.size_changed(|_, event| {
+    let body = surface(BG, 0.0, 0.0);
+    body.set_clip_to_bounds(true);
+    body.size_changed(|_, event| {
         if event.height_changed() {
             let height = event.new_size().height;
             use ferroui_base::threading::{Dispatcher, DispatcherPriority};
@@ -510,7 +515,7 @@ fn build() {
     let chrome = surface(BG, 0.0, 0.0);
     chrome.set_child(top_bar(mobile, &model));
     put(&root, 0, 0, chrome.clone().upcast());
-    put(&root, 0, 1, main.clone().upcast());
+    put(&root, 0, 1, body.clone().upcast());
     let footer = surface(BG, 0.0, 0.0);
     let backdrop = surface("#01000000", 0.0, 0.0);
     backdrop.set_is_hit_test_visible(false);
@@ -527,7 +532,9 @@ fn build() {
     UI.with(|s| {
         let mut s = s.borrow_mut();
         s.fire = Some(effects::TransportFire::new(&backdrop, s.reduced));
+        s.body = Some(body);
         s.main = Some(main);
+        s.collection = None;
         s.footer = Some(footer);
         s.chrome = Some(chrome);
         s.transport = Some(transport);
@@ -821,6 +828,15 @@ fn virtual_list<T: PartialEq + 'static>(
     spacing: f64,
     build: impl Fn(&T) -> Ref<Control> + 'static,
 ) -> Ref<Control> {
+    let repeater = virtual_repeater(spacing, build);
+    set_repeater_items(&repeater, items);
+    repeater.upcast()
+}
+
+fn virtual_repeater<T: PartialEq + 'static>(
+    spacing: f64,
+    build: impl Fn(&T) -> Ref<Control> + 'static,
+) -> Ref<ItemsRepeater> {
     let light = LIGHT_PAGE.get();
     let repeater = ItemsRepeater::new();
     let layout = StackLayout::new();
@@ -836,12 +852,18 @@ fn virtual_list<T: PartialEq + 'static>(
         false,
     );
     repeater.set_data_template(Some(template));
+    repeater
+}
+
+fn set_repeater_items<T: PartialEq + 'static>(
+    repeater: &ItemsRepeater,
+    items: impl IntoIterator<Item = T>,
+) {
     repeater.set_items_source(Some(ItemsSource::from_items(
         items
             .into_iter()
             .map(|item| Some(Rc::new(item) as BoxedValue)),
     )));
-    repeater.upcast()
 }
 
 fn track_list<'a>(items: impl IntoIterator<Item = &'a Item>, compact: bool) -> Ref<Control> {
@@ -856,40 +878,42 @@ fn collection_cards(items: &[Item], cols: usize) -> Ref<Control> {
     virtual_list(
         items.chunks(cols).map(<[Item]>::to_vec),
         8.0,
-        move |chunk| {
-            let g = grid(&vec!["*"; cols].join(","), "");
-            for (idx, item) in chunk.iter().enumerate() {
-                let card = surface("Transparent", 0.0, 0.0);
-                card.set_margin(Thickness::new(
-                    if idx == 0 { 0.0 } else { 4.0 },
-                    0.0,
-                    if idx + 1 == cols { 0.0 } else { 4.0 },
-                    0.0,
-                ));
-                let light = surface("Transparent", 0.0, 0.0);
-                reveal(&light);
-                let p = stack(5.0);
-                let size = if cols > 2 { 104.0 } else { 112.0 };
-                let image = cover(&item.art, size, 0.0);
-                image.set_width(size);
-                image.set_horizontal_alignment(H::Left);
-                p.children().add(image.upcast::<Control>());
-                p.children()
-                    .add(strong(&item.title, 13.0, TEXT).upcast::<Control>());
-                p.children()
-                    .add(label(&item.artist, 10.5, MUTED).upcast::<Control>());
-                let id = item.id.clone();
-                let b = button(&item.title, p.upcast(), false, move || send("open", &id));
-                b.set_horizontal_alignment(H::Stretch);
-                b.set_horizontal_content_alignment(H::Stretch);
-                b.set_padding(Thickness::uniform(8.0));
-                light.set_child(b);
-                card.set_child(light);
-                put(&g, idx as i32, 0, card.upcast());
-            }
-            g.upcast()
-        },
+        move |chunk| collection_card_row(chunk, cols),
     )
+}
+
+fn collection_card_row(chunk: &[Item], cols: usize) -> Ref<Control> {
+    let g = grid(&vec!["*"; cols].join(","), "");
+    for (idx, item) in chunk.iter().enumerate() {
+        let card = surface("Transparent", 0.0, 0.0);
+        card.set_margin(Thickness::new(
+            if idx == 0 { 0.0 } else { 4.0 },
+            0.0,
+            if idx + 1 == cols { 0.0 } else { 4.0 },
+            0.0,
+        ));
+        let light = surface("Transparent", 0.0, 0.0);
+        reveal(&light);
+        let p = stack(5.0);
+        let size = if cols > 2 { 104.0 } else { 112.0 };
+        let image = cover(&item.art, size, 0.0);
+        image.set_width(size);
+        image.set_horizontal_alignment(H::Left);
+        p.children().add(image.upcast::<Control>());
+        p.children()
+            .add(strong(&item.title, 13.0, TEXT).upcast::<Control>());
+        p.children()
+            .add(label(&item.artist, 10.5, MUTED).upcast::<Control>());
+        let id = item.id.clone();
+        let b = button(&item.title, p.upcast(), false, move || send("open", &id));
+        b.set_horizontal_alignment(H::Stretch);
+        b.set_horizontal_content_alignment(H::Stretch);
+        b.set_padding(Thickness::uniform(8.0));
+        light.set_child(b);
+        card.set_child(light);
+        put(&g, idx as i32, 0, card.upcast());
+    }
+    g.upcast()
 }
 fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
     let light = surface("Transparent", 0.0, 0.0);
@@ -1076,9 +1100,6 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     } else {
         2
     };
-    if m.page == "library" {
-        return collection(m, width, animate);
-    }
     {
         page.children().add(header(&m.title, ""));
         if !m.caption.is_empty() {
@@ -1170,70 +1191,63 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     }
     frame.upcast()
 }
-fn collection(m: &Model, width: f64, animate: bool) -> Ref<Control> {
-    let compact = width < 790.0;
-    let page = stack(20.0);
-    page.set_max_width(1370.0);
-    page.set_margin(Thickness::new(
-        if compact { 16.0 } else { 44.0 },
-        16.0,
-        if compact { 16.0 } else { 44.0 },
-        30.0,
-    ));
-    let heading = surface("Transparent", 0.0, 0.0);
-    heading.set_horizontal_alignment(H::Left);
-    heading.set_child(metro_title("music", 44.0));
-    if animate {
-        effects::entrance(&heading, 24.0, 0);
-    }
-    page.children().add(heading.upcast::<Control>());
-    let filters = row(3.0);
-    filters
-        .children()
-        .add(pill("Liked songs", "heart", false, "navigate", "liked").upcast::<Control>());
-    for (name, id) in [("Artists", "section:artists"), ("Albums", "section:albums")] {
-        if m.connected {
-            filters
-                .children()
-                .add(pill(name, "library", false, "open", id).upcast::<Control>());
+struct CollectionPane<T> {
+    host: Ref<Grid>,
+    viewer: Ref<ScrollViewer>,
+    repeater: Ref<ItemsRepeater>,
+    items: RefCell<Vec<T>>,
+}
+
+impl<T: Clone + PartialEq + 'static> CollectionPane<T> {
+    fn new(title: &str, spacing: f64, build: impl Fn(&T) -> Ref<Control> + 'static) -> Self {
+        let viewer = scroll();
+        viewer.set_is_scroll_chaining_enabled(false);
+        viewer.set_allow_auto_hide(false);
+        viewer.set_background(Some(brush("Transparent")));
+        viewer
+            .resources()
+            .set("ScrollBarThumbBackground", Some(Rc::new(brush("#958892"))));
+        AutomationProperties::set_name(&viewer, Some(title));
+
+        let repeater = virtual_repeater(spacing, build);
+        viewer.set_content(Some(Rc::new(repeater.clone().upcast::<Control>())));
+
+        let host = grid("", "Auto,*");
+        let heading = kicker(title, TEXT);
+        heading.set_margin(Thickness::new(0.0, 0.0, 0.0, 8.0));
+        put(&host, 0, 0, heading.upcast());
+        put(&host, 0, 1, viewer.clone().upcast());
+        Self {
+            host,
+            viewer,
+            repeater,
+            items: RefCell::default(),
         }
     }
-    page.children().add(filters.upcast::<Control>());
-    let catalog = grid(
-        if compact { "" } else { "1.05*,2.1*,1.8*" },
-        if compact { "Auto,Auto" } else { "" },
-    );
-    let tracks = m.items.iter().filter(|item| item.kind == "track");
-    let selected = UI.with(|ui| ui.borrow().artist_filter.clone());
-    if !compact {
-        let artists = stack(10.0);
-        artists
-            .children()
-            .add(kicker("ARTISTS", TEXT).upcast::<Control>());
-        let names = tracks
-            .clone()
-            .filter(|item| !item.artist.is_empty())
-            .map(|item| item.artist.clone())
-            .collect::<std::collections::BTreeSet<_>>();
-        let all = artist_button("All artists", None, selected.is_none());
-        artists.children().add(all.upcast::<Control>());
-        artists
-            .children()
-            .add(virtual_list(names, 1.0, move |name| {
-                artist_button(name, Some(name.clone()), selected.as_ref() == Some(name)).upcast()
-            }));
-        put(&catalog, 0, 0, artists.upcast());
-    }
 
-    let albums = stack(12.0);
-    albums
-        .children()
-        .add(kicker("PLAYLISTS", TEXT).upcast::<Control>());
-    if m.collections.is_empty() {
-        albums
-            .children()
-            .add(label("Your playlists appear here.", 13.0, MUTED).upcast::<Control>());
-    } else {
+    fn update(&self, items: Vec<T>) {
+        if *self.items.borrow() != items {
+            set_repeater_items(&self.repeater, items.iter().cloned());
+            *self.items.borrow_mut() = items;
+        }
+    }
+}
+
+struct CollectionView {
+    root: Ref<Grid>,
+    artists: CollectionPane<Option<String>>,
+    playlists: CollectionPane<Vec<Item>>,
+    songs: CollectionPane<(usize, Item)>,
+    playlist_empty: Ref<TextBlock>,
+    song_empty: Ref<TextBlock>,
+    tabs: Vec<Ref<TextBlock>>,
+    selected_artist: RefCell<Option<String>>,
+    cols: usize,
+}
+
+impl CollectionView {
+    fn new(m: &Model, width: f64, animate: bool, reduced: bool) -> Self {
+        let compact = width < 790.0;
         let cols = if width >= 1360.0 {
             4
         } else if width >= 1050.0 {
@@ -1241,47 +1255,221 @@ fn collection(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         } else {
             2
         };
-        albums
-            .children()
-            .add(collection_cards(&m.collections, cols));
-    }
-    put(&catalog, if compact { 0 } else { 1 }, 0, albums.upcast());
+        let root = grid("", "Auto,Auto,Auto,*");
+        let inset = if compact { 16.0 } else { 44.0 };
+        root.set_margin(Thickness::new(inset, 16.0, inset, 16.0));
+        root.set_max_width(1370.0);
+        if !reduced {
+            root.set_background(Some(brush("Transparent")));
+            let backdrop = surface("Transparent", 0.0, 0.0);
+            backdrop.set_is_hit_test_visible(false);
+            backdrop.set_clip_to_bounds(true);
+            Grid::set_row_span(&backdrop, 4);
+            put(&root, 0, 0, backdrop.clone().upcast());
+            effects::reveal_light(&root, &backdrop);
+        }
 
-    let songs = stack(5.0);
-    songs.set_margin(if compact {
-        Thickness::new(0.0, 18.0, 0.0, 0.0)
-    } else {
-        Thickness::new(26.0, 0.0, 0.0, 0.0)
-    });
-    songs
-        .children()
-        .add(kicker("SONGS", TEXT).upcast::<Control>());
-    let filter = UI.with(|ui| ui.borrow().artist_filter.clone());
-    songs.children().add(track_list(
-        tracks
-            .filter(|item| compact || filter.as_ref().is_none_or(|artist| item.artist == *artist)),
-        false,
-    ));
-    put(
-        &catalog,
-        if compact { 0 } else { 2 },
-        if compact { 1 } else { 0 },
-        songs.upcast(),
-    );
-    page.children().add(catalog.upcast::<Control>());
-    page.upcast()
+        let heading = surface("Transparent", 0.0, 0.0);
+        heading.set_horizontal_alignment(H::Left);
+        heading.set_child(metro_title("music", if compact { 34.0 } else { 44.0 }));
+        heading.set_margin(Thickness::new(
+            0.0,
+            0.0,
+            0.0,
+            if compact { 10.0 } else { 20.0 },
+        ));
+        if animate {
+            effects::entrance(&heading, 24.0, 0);
+        }
+        put(&root, 0, 0, heading.upcast());
+
+        let filters = row(3.0);
+        filters
+            .children()
+            .add(pill("Liked songs", "heart", false, "navigate", "liked").upcast::<Control>());
+        if m.connected {
+            for (name, id) in [("Artists", "section:artists"), ("Albums", "section:albums")] {
+                filters
+                    .children()
+                    .add(pill(name, "library", false, "open", id).upcast::<Control>());
+            }
+        }
+        filters.set_margin(Thickness::new(
+            0.0,
+            0.0,
+            0.0,
+            if compact { 10.0 } else { 20.0 },
+        ));
+        put(&root, 0, 1, filters.upcast());
+
+        let artists = CollectionPane::new("ARTISTS", 1.0, artist_button);
+        let playlists = CollectionPane::new("PLAYLISTS", 8.0, move |chunk: &Vec<Item>| {
+            collection_card_row(chunk, cols)
+        });
+        let songs = CollectionPane::new("SONGS", 2.0, |(index, item)| track(item, *index, false));
+        let playlist_empty = collection_empty(&playlists.host, "Your playlists appear here.");
+        let song_empty = collection_empty(&songs.host, "No songs to show.");
+
+        let catalog = grid(if compact { "" } else { "1.05*,2.1*,1.8*" }, "");
+        let mut tabs = Vec::new();
+        let tab_row = row(8.0);
+        for (index, (name, pane)) in [
+            ("Artists", &artists.host),
+            ("Playlists", &playlists.host),
+            ("Songs", &songs.host),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if compact {
+                let text = strong(name, 12.0, TEXT);
+                let tab = button(
+                    &format!("Show {name}"),
+                    text.clone().upcast(),
+                    false,
+                    move || {
+                        if let Some(view) = UI.with(|ui| ui.borrow().collection.clone()) {
+                            view.show_pane(index);
+                        }
+                    },
+                );
+                tab_row.children().add(tab.upcast::<Control>());
+                tabs.push(text);
+            } else if index > 0 {
+                pane.set_margin(Thickness::new(20.0, 0.0, 0.0, 0.0));
+            }
+            put(
+                &catalog,
+                if compact { 0 } else { index as i32 },
+                0,
+                pane.clone().upcast(),
+            );
+        }
+        if compact {
+            tab_row.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
+            put(&root, 0, 2, tab_row.upcast());
+        }
+        put(&root, 0, 3, catalog.upcast());
+
+        let view = Self {
+            root,
+            artists,
+            playlists,
+            songs,
+            playlist_empty,
+            song_empty,
+            tabs,
+            selected_artist: RefCell::default(),
+            cols,
+        };
+        view.show_pane(1);
+        view
+    }
+
+    fn show_pane(&self, selected: usize) {
+        let panes = [&self.artists.host, &self.playlists.host, &self.songs.host];
+        for (index, (tab, pane)) in self.tabs.iter().zip(panes).enumerate() {
+            tab.set_foreground(Some(brush(if index == selected {
+                "#BA1267"
+            } else {
+                "#635A63"
+            })));
+            pane.set_is_visible(index == selected);
+        }
+    }
+
+    fn update(&self, m: &Model) {
+        let selected = UI.with(|ui| ui.borrow().artist_filter.clone());
+        let tracks = m.items.iter().filter(|item| item.kind == "track");
+        let names = tracks
+            .clone()
+            .filter(|item| !item.artist.is_empty())
+            .map(|item| item.artist.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        self.artists.update(
+            std::iter::once(None)
+                .chain(names.into_iter().map(Some))
+                .collect(),
+        );
+        self.playlists.update(
+            m.collections
+                .chunks(self.cols)
+                .map(<[Item]>::to_vec)
+                .collect(),
+        );
+        self.playlist_empty.set_is_visible(m.collections.is_empty());
+
+        self.songs.update(
+            tracks
+                .filter(|item| {
+                    selected
+                        .as_ref()
+                        .is_none_or(|artist| item.artist == *artist)
+                })
+                .cloned()
+                .enumerate()
+                .collect(),
+        );
+        self.song_empty
+            .set_is_visible(self.songs.items.borrow().is_empty());
+
+        if *self.selected_artist.borrow() != selected {
+            let previous = self.selected_artist.replace(selected.clone());
+            self.mark_artist(&previous, false);
+            self.mark_artist(&selected, true);
+            self.songs.viewer.scroll_to_home();
+        }
+    }
+
+    fn mark_artist(&self, artist: &Option<String>, selected: bool) {
+        if let Ok(index) = self.artists.items.borrow().binary_search(artist)
+            && let Some(control) = self.artists.repeater.try_get_element(index as i32)
+            && let Ok(button) = control.downcast::<Button>()
+            && let Some(text) = button.content().as_ref().and_then(Control::from_boxed)
+            && let Ok(text) = text.downcast::<TextBlock>()
+        {
+            text.set_foreground(Some(artist_ink(selected)));
+        }
+    }
 }
 
-fn artist_button(name: &str, artist: Option<String>, selected: bool) -> Ref<Button> {
-    let text = label(name, 13.0, if selected { "#BA1267" } else { TEXT });
+fn collection_empty(host: &Grid, message: &str) -> Ref<TextBlock> {
+    let text = label(message, 13.0, MUTED);
+    text.set_vertical_alignment(V::Top);
+    put(host, 0, 1, text.clone().upcast());
+    text
+}
+
+fn artist_ink(selected: bool) -> Rc<dyn IBrush> {
+    brush(if selected { "#BA1267" } else { TEXT })
+}
+
+fn artist_button(artist: &Option<String>) -> Ref<Control> {
+    let name = artist.as_deref().unwrap_or("All artists");
+    let selected = UI.with(|ui| ui.borrow().artist_filter == *artist);
+    let text = label(name, 13.0, TEXT);
+    text.set_foreground(Some(artist_ink(selected)));
+    let selection = artist.clone();
     let button = button(name, text.upcast(), false, move || {
-        UI.with(|ui| ui.borrow_mut().artist_filter = artist.clone());
-        refresh(true, false, false);
+        let changed = UI.with(|ui| {
+            let mut ui = ui.borrow_mut();
+            if ui.artist_filter == selection {
+                return false;
+            }
+            ui.artist_filter = selection.clone();
+            true
+        });
+        if changed {
+            refresh(true, false, false);
+        }
+        if let Some(view) = UI.with(|ui| ui.borrow().collection.clone()) {
+            view.show_pane(2);
+        }
     });
     button.set_horizontal_content_alignment(H::Left);
     button.set_horizontal_alignment(H::Stretch);
     button.set_padding(Thickness::new(0.0, 5.0, 5.0, 5.0));
-    button
+    button.upcast()
 }
 
 fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
@@ -1293,9 +1481,9 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     } else {
         let viewport = UI.with(|ui| {
             ui.borrow()
-                .main
+                .body
                 .as_ref()
-                .map_or(480.0, |main| main.bounds().height)
+                .map_or(480.0, |body| body.bounds().height)
         });
         stage.set_height(viewport.max(340.0));
         UI.with(|ui| ui.borrow_mut().now_stage = Some(stage.downgrade()));
@@ -1650,12 +1838,13 @@ fn refresh(body: bool, playback: bool, animate: bool) {
     if !body && !playback {
         return;
     }
-    let (m, width, main, footer, nav, reduced, chrome, transport, fire, search, account) =
-        UI.with(|ui| {
+    let (m, width, host, main, footer, nav, reduced, chrome, transport, fire, search, account) = UI
+        .with(|ui| {
             let ui = ui.borrow();
             (
                 ui.model.clone(),
                 ui.width,
+                ui.body.clone(),
                 ui.main.clone(),
                 ui.footer.clone(),
                 ui.nav.clone(),
@@ -1685,11 +1874,31 @@ fn refresh(body: bool, playback: bool, animate: bool) {
             let selected = m.page == route || (route == "library" && collection);
             text.set_foreground(Some(brush(if selected { TEXT } else { MUTED })));
         }
-        if let Some(main) = main {
+        if let Some(host) = host {
             UI.with(|ui| ui.borrow_mut().now_stage = None);
-            let view = main_page(&m, width, animate && !reduced);
-            main.set_background(Some(brush(BG)));
-            main.set_content(Some(Rc::new(view)));
+            host.set_background(Some(brush(BG)));
+            if m.page == "library" {
+                let existing = UI.with(|ui| ui.borrow().collection.clone());
+                let view = existing.unwrap_or_else(|| {
+                    let view =
+                        Rc::new(CollectionView::new(&m, width, animate && !reduced, reduced));
+                    UI.with(|ui| ui.borrow_mut().collection = Some(view.clone()));
+                    if let Some(main) = &main {
+                        main.set_content(None);
+                    }
+                    host.set_child(view.root.clone());
+                    view
+                });
+                view.update(&m);
+            } else if let Some(main) = main {
+                UI.with(|ui| ui.borrow_mut().collection = None);
+                let child = main.clone().upcast::<Control>();
+                if host.child().as_ref() != Some(&child) {
+                    host.set_child(child);
+                }
+                let view = main_page(&m, width, animate && !reduced);
+                main.set_content(Some(Rc::new(view)));
+            }
         }
         LIGHT_PAGE.set(false);
     }
@@ -1749,6 +1958,11 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
         let body = body
             && (reset
                 || match model.page.as_str() {
+                    "library" => {
+                        previous.page != model.page
+                            || previous.items != model.items
+                            || previous.collections != model.collections
+                    }
                     "home" => {
                         previous.page != model.page
                             || previous.items != model.items
