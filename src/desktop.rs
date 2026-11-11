@@ -1,8 +1,8 @@
 use crate::{
     app::{self, Item, Model},
-    spectrum,
     audio::Audio,
     listen::Listener,
+    spectrum,
     spotify::{self, Http, Session, item, query, split_uri, str_field},
 };
 use ferroui_base::{
@@ -74,6 +74,17 @@ enum Update {
     Command {
         refresh_queue: bool,
     },
+    Seek {
+        target: SeekTarget,
+        result: spotify::Result<()>,
+    },
+}
+
+struct SeekTarget {
+    track: String,
+    device: String,
+    seconds: f64,
+    due: Instant,
 }
 
 #[derive(Clone, Copy)]
@@ -173,8 +184,11 @@ struct Desktop {
     sign_in: Option<Arc<AtomicBool>>,
     last_poll: Instant,
     poll_pending: bool,
+    poll_again_at: Option<Instant>,
     search_at: Option<Instant>,
-    seek_at: Option<(Instant, f64)>,
+    seek_at: Option<SeekTarget>,
+    seek_pending: bool,
+    seek_hold_until: Option<Instant>,
     volume_at: Option<Instant>,
     position: f64,
     position_at: Instant,
@@ -224,8 +238,11 @@ impl Desktop {
             sign_in: None,
             last_poll: Instant::now(),
             poll_pending: false,
+            poll_again_at: None,
             search_at: None,
             seek_at: None,
+            seek_pending: false,
+            seek_hold_until: None,
             volume_at: None,
             position: 0.0,
             position_at: Instant::now(),
@@ -297,8 +314,12 @@ impl Desktop {
             player,
             reset,
         );
-        if player {
-            app::tick(self.position);
+        if player && (!self.seek_pending || self.seek_at.is_some()) {
+            app::tick(
+                self.seek_at
+                    .as_ref()
+                    .map_or(self.position, |seek| seek.seconds),
+            );
         }
     }
 
@@ -380,8 +401,11 @@ impl Desktop {
             .store(self.generation, Ordering::Release);
         self.page_version += 1;
         self.poll_pending = false;
+        self.poll_again_at = None;
         self.search_at = None;
         self.seek_at = None;
+        self.seek_pending = false;
+        self.seek_hold_until = None;
         self.volume_at = None;
         self.request(
             None,
@@ -598,13 +622,16 @@ impl Desktop {
         });
         let Some(target) = target else { return Ok(()) };
         if self.model.connected {
-            let payload = match target.kind.as_str() {
-                "track" => json!({ "uris": [target.id] }),
-                "album" | "playlist" => json!({ "context_uri": target.id }),
-                _ => {
-                    json!({ "uris": self.model.items.iter().filter(|item| item.kind == "track").take(50).map(|item| &item.id).collect::<Vec<_>>() })
-                }
+            let list = if self.model.page == "queue" {
+                &self.model.queue
+            } else {
+                &self.model.items
             };
+            let context = (self.model.page == "detail").then_some(self.model.detail.as_str());
+            let payload = playback_payload(&target, list, context);
+            if payload["uris"].as_array().is_some_and(Vec::is_empty) {
+                return Ok(());
+            }
             self.start_playback(payload);
             return Ok(());
         }
@@ -654,6 +681,7 @@ impl Desktop {
 
     fn next(&mut self, previous: bool, ended: bool) -> spotify::Result<()> {
         if self.model.connected {
+            self.cancel_seek();
             self.control(
                 if previous { "previous" } else { "next" },
                 Http::Post,
@@ -732,7 +760,15 @@ impl Desktop {
 
     fn seek(&mut self, value: f64) -> spotify::Result<()> {
         if self.model.connected {
-            self.seek_at = Some((Instant::now() + Duration::from_millis(180), value));
+            if self.model.current.id.is_empty() || self.model.current.duration <= 0.0 {
+                return Ok(());
+            }
+            self.seek_at = Some(SeekTarget {
+                track: self.model.current.id.clone(),
+                device: self.playback_device().unwrap_or_default().to_owned(),
+                seconds: value.min((self.model.current.duration - 0.001).max(0.0)),
+                due: Instant::now() + Duration::from_millis(160),
+            });
         } else if let Some(audio) = &self.audio {
             audio
                 .sink
@@ -743,6 +779,16 @@ impl Desktop {
         Ok(())
     }
 
+    fn cancel_seek(&mut self) {
+        self.seek_at = None;
+        self.seek_hold_until = None;
+    }
+
+    fn matches_seek(&self, seek: &SeekTarget) -> bool {
+        self.model.current.id == seek.track
+            && self.playback_device().unwrap_or_default() == seek.device
+    }
+
     fn playback_device(&self) -> Option<&str> {
         [&self.selected_device, &self.active_device]
             .into_iter()
@@ -751,6 +797,7 @@ impl Desktop {
     }
 
     fn start_playback(&mut self, payload: Value) {
+        self.cancel_seek();
         if self.playback_device().is_some() {
             self.control("play", Http::Put, &[], Some(payload));
         } else {
@@ -909,6 +956,7 @@ impl Desktop {
             }
             "devices" => self.navigate("devices", ""),
             "transfer" if self.model.connected => {
+                self.cancel_seek();
                 let device = value.to_owned();
                 let started_playback = self.pending_play.is_some();
                 let (path, body) = device_selection_request(
@@ -1085,6 +1133,10 @@ impl Desktop {
                 let changed_track = track
                     .as_ref()
                     .is_some_and(|item| item.id != self.model.current.id);
+                let device = str_field(&data["device"], "id");
+                if changed_track || (!device.is_empty() && device != self.active_device) {
+                    self.cancel_seek();
+                }
                 let volume = if self.volume_at.is_some() {
                     self.model.volume
                 } else {
@@ -1098,17 +1150,34 @@ impl Desktop {
                 let repeat = data["repeat_state"]
                     .as_str()
                     .map_or(self.model.repeat, |state| state != "off");
-                let changed = changed_track
+                let changed = track
+                    .as_ref()
+                    .is_some_and(|track| track != &self.model.current)
                     || playing != self.model.playing
                     || volume != self.model.volume
                     || shuffle != self.model.shuffle
                     || repeat != self.model.repeat;
-                self.active_device = str_field(&data["device"], "id").to_owned();
-                self.position = data["progress_ms"]
-                    .as_f64()
-                    .unwrap_or(self.position * 1000.0)
-                    / 1000.0;
-                self.position_at = Instant::now();
+                if !device.is_empty() {
+                    self.active_device = device.to_owned();
+                }
+                if changed_track
+                    || (self.seek_at.is_none()
+                        && !self.seek_pending
+                        && self
+                            .seek_hold_until
+                            .is_none_or(|until| Instant::now() >= until))
+                {
+                    let elapsed = if self.model.playing {
+                        self.position_at.elapsed().as_secs_f64()
+                    } else {
+                        0.0
+                    };
+                    self.position = data["progress_ms"].as_f64().map_or(
+                        (self.position + elapsed).min(self.model.current.duration),
+                        |ms| ms / 1000.0,
+                    );
+                    self.position_at = Instant::now();
+                }
                 self.model.playing = playing;
                 self.model.volume = volume;
                 self.model.shuffle = shuffle;
@@ -1153,13 +1222,30 @@ impl Desktop {
                     self.status("Playback device selected.");
                 }
                 self.poll_playback();
+                self.poll_again_at = Some(Instant::now() + Duration::from_secs(1));
             }
             Update::Command { refresh_queue } => {
                 if self.model.connected {
                     self.poll_playback();
+                    self.poll_again_at = Some(Instant::now() + Duration::from_secs(1));
                     if refresh_queue {
                         self.fetch_queue();
                     }
+                }
+            }
+            Update::Seek { target, result } => {
+                self.seek_pending = false;
+                if self.matches_seek(&target) && self.seek_at.is_none() {
+                    match result {
+                        Ok(()) => {
+                            self.position = target.seconds;
+                            self.position_at = Instant::now();
+                            self.seek_hold_until =
+                                Some(self.position_at + Duration::from_millis(900));
+                        }
+                        Err(error) => self.status(error),
+                    }
+                    self.poll_again_at = Some(Instant::now() + Duration::from_secs(1));
                 }
             }
         }
@@ -1185,21 +1271,30 @@ impl Desktop {
             );
         }
         if self.model.connected {
-            if self.last_poll.elapsed() >= Duration::from_secs(7) {
+            if !self.poll_pending
+                && (self.last_poll.elapsed() >= Duration::from_secs(5)
+                    || self.poll_again_at.is_some_and(|at| at <= now))
+            {
+                self.poll_again_at = None;
                 self.poll_playback();
             }
-            if let Some((at, value)) = self.seek_at
-                && at <= now
+            if !self.seek_pending
+                && self.seek_at.as_ref().is_some_and(|seek| seek.due <= now)
+                && let Some(target) = self.seek_at.take()
+                && self.matches_seek(&target)
             {
-                self.seek_at = None;
-                self.position = value;
-                self.position_at = now;
-                self.control(
-                    "seek",
-                    Http::Put,
-                    &[("position_ms", &((value * 1000.0) as u64).to_string())],
-                    None,
-                );
+                self.seek_pending = true;
+                let ms = (target.seconds * 1000.0).round() as u64;
+                let suffix = if target.device.is_empty() {
+                    String::new()
+                } else {
+                    format!("&{}", query(&[("device_id", target.device.as_str())]))
+                };
+                let path = format!("/me/player/seek?position_ms={ms}{suffix}");
+                self.api(None, true, false, move |session| {
+                    let result = session.request(Http::Put, &path, None).map(|_| ());
+                    Ok(Update::Seek { target, result })
+                });
             }
             if self.volume_at.is_some_and(|at| at <= now) {
                 self.volume_at = None;
@@ -1210,7 +1305,7 @@ impl Desktop {
                     None,
                 );
             }
-            if self.seek_at.is_none() {
+            if self.seek_at.is_none() && !self.seek_pending {
                 let elapsed = if self.model.playing {
                     self.position_at.elapsed().as_secs_f64()
                 } else {
@@ -1318,6 +1413,27 @@ fn section(id: &str, title: &str, description: &str) -> Item {
     }
 }
 
+fn playback_payload(target: &Item, items: &[Item], context: Option<&str>) -> Value {
+    if matches!(target.kind.as_str(), "album" | "playlist") {
+        return json!({ "context_uri": target.id });
+    }
+    let mut tracks = items.iter().filter(|item| item.kind == "track").peekable();
+    if target.kind == "track" {
+        while tracks.peek().is_some_and(|item| item.id != target.id) {
+            tracks.next();
+        }
+        if tracks.peek().is_none() {
+            return json!({ "uris": [target.id] });
+        }
+        if let Some(context) = context
+            .filter(|uri| uri.starts_with("spotify:album:") || uri.starts_with("spotify:playlist:"))
+        {
+            return json!({ "context_uri": context, "offset": { "uri": target.id } });
+        }
+    }
+    json!({ "uris": tracks.take(100).map(|item| &item.id).collect::<Vec<_>>() })
+}
+
 fn number(value: &str, max: f64) -> Option<f64> {
     value
         .parse::<f64>()
@@ -1329,6 +1445,25 @@ fn number(value: &str, max: f64) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn playing_a_song_keeps_the_rest_of_its_list_or_spotify_context() {
+        let tracks: Vec<Item> = ["first", "selected", "next"]
+            .map(|name| Item {
+                id: format!("spotify:track:{name}"),
+                kind: "track".into(),
+                ..Item::default()
+            })
+            .into();
+        assert_eq!(
+            playback_payload(&tracks[1], &tracks, None),
+            json!({ "uris": ["spotify:track:selected", "spotify:track:next"] })
+        );
+        assert_eq!(
+            playback_payload(&tracks[1], &tracks, Some("spotify:playlist:music")),
+            json!({ "context_uri": "spotify:playlist:music", "offset": { "uri": "spotify:track:selected" } })
+        );
+    }
 
     #[test]
     fn choosing_device_starts_the_pending_track_and_targets_the_device() {

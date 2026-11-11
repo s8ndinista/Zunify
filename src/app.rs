@@ -2220,7 +2220,9 @@ pub fn tick(position: f64) {
         (ui.seek.clone(), ui.elapsed.clone())
     });
     TICKING.set(true);
-    if let Some(bar) = bar {
+    if let Some(bar) = bar
+        && !bar.is_dragging()
+    {
         bar.set_range_value(position);
     }
     if let Some(t) = t {

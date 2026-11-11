@@ -22,7 +22,8 @@ let library = [], pins = [], recent = [], liked = new Set(), order = [], queue =
 let current = {}, page = "home", detail = "", query = "", title = "", caption = "", status = "";
 let playing = false, shuffle = false, repeat = false, volume = 65, items = [];
 let connectionVersion = 0;
-let recentCommandAt = -Infinity, skipProgressUntil = 0;
+let recentCommandAt = -Infinity, seekHoldUntil = 0, pendingSeek, seekRequest, seeking = false;
+let playbackRevision = 0, playbackPoll, playbackRefresh;
 const read = (name, fallback) => {
   try { return JSON.parse(localStorage.getItem(name)) ?? fallback; } catch { return fallback; }
 };
@@ -42,10 +43,11 @@ const model = () => ({
   pins, recent, current: decorated(current), playing, shuffle, repeat, volume,
 });
 const tick = () => {
-  if (!runtime || performance.now() < skipProgressUntil) return;
-  const time = spotify.connected ? position + (playing && updatedAt ? (performance.now() - updatedAt) / 1000 : 0) : audio.currentTime;
+  if (!runtime) return;
+  const time = spotify.connected ? pendingSeek?.seconds ?? spotifyPosition() : audio.currentTime;
   runtime.tick(Math.max(0, Math.min(current.duration || 0, time)));
 };
+const spotifyPosition = () => position + (playing && updatedAt ? (performance.now() - updatedAt) / 1000 : 0);
 // While music plays, each frame hands the analyser the samples that are sounding right now.
 const silence = new Float32Array(0);
 let pumping = false;
@@ -191,18 +193,22 @@ const deviceQuery = id => "?device_id=" + encodeURIComponent(id);
 async function transfer(id) {
   if (!spotify.connected) { notice("Demo audio plays on this device."); return; }
   const previous = selected;
+  const seekInFlight = cancelSeek();
+  playbackRevision++;
   selected = id;
   let output;
   try {
     if (id === "browser" && spotify.player) await spotify.player.activateElement();
     output = await targetDevice();
     if (output === spotify.device) await spotify.player.activateElement();
+    await seekInFlight;
     await spotify.request("/me/player", "PUT", { device_ids: [output], play: playing });
   } catch (error) {
     selected = previous;
     throw error;
   }
   spotify.active = output;
+  refreshPlayback();
   await navigate("devices");
   notice("Playback device selected.");
 }
@@ -225,6 +231,17 @@ function demoSource(track, upcoming) {
     throw error;
   });
 }
+function playbackPayload(target) {
+  if (target.kind === "album" || target.kind === "playlist") return { context_uri: target.id };
+  const list = (page === "queue" ? queue : items).filter(item => item.kind === "track");
+  if (target.kind !== "track") return { uris: list.slice(0, 100).map(item => item.id) };
+  const index = list.findIndex(item => item.id === target.id);
+  if (index < 0) return { uris: [target.id] };
+  if (page === "detail" && /^spotify:(album|playlist):/.test(detail)) {
+    return { context_uri: detail, offset: { uri: target.id } };
+  }
+  return { uris: list.slice(index, index + 100).map(item => item.id) };
+}
 async function play(id) {
   let target = known.get(id || detail);
   if (!target && !id) target = items.find(x => x.kind === "track");
@@ -240,16 +257,22 @@ async function play(id) {
     const list = items.filter(x => x.kind === "track");
     return demoSource(target, list.includes(target) ? list : tracks);
   }
-  recentCommandAt = performance.now();
+  const seekInFlight = cancelSeek();
+  const version = connectionVersion;
+  const payload = playbackPayload(target);
+  if (payload.uris?.length === 0) return;
   resumeCapture();
   if ((!selected || selected === "browser") && spotify.player) await spotify.player.activateElement();
   const output = await targetDevice();
   if (output === spotify.device) await spotify.player.activateElement();
-  const payload = target.kind === "track" ? { uris: [target.id] }
-    : target.kind === "album" || target.kind === "playlist" ? { context_uri: target.id }
-    : { uris: items.filter(x => x.kind === "track").map(x => x.id).slice(0, 50) };
-  if (payload.uris?.length === 0) return;
+  await seekInFlight;
+  if (version !== connectionVersion) return;
+  recentCommandAt = performance.now();
+  const revision = ++playbackRevision;
   await spotify.request("/me/player/play" + deviceQuery(output), "PUT", payload);
+  if (version !== connectionVersion) return;
+  refreshPlayback();
+  if (revision !== playbackRevision) return;
   spotify.active = output;
   if (target.kind === "track") {
     current = target;
@@ -276,7 +299,9 @@ async function toggle() {
   const version = connectionVersion;
   const track = current.id;
   if (nextPlaying && spotify.active && spotify.active === spotify.device) await spotify.player?.activateElement();
+  playbackRevision++;
   await control(nextPlaying ? "play" : "pause");
+  refreshPlayback();
   // The SDK may already have reported the new state while the request was in flight.
   if (version !== connectionVersion || track !== current.id || playing === nextPlaying) return;
   const now = performance.now();
@@ -289,7 +314,10 @@ async function toggle() {
 }
 async function nextTrack(previous = false, ended = false) {
   if (spotify.connected) {
+    await cancelSeek();
+    playbackRevision++;
     await control(previous ? "previous" : "next", "POST");
+    refreshPlayback();
     return syncQueue();
   }
   if (previous) {
@@ -336,7 +364,8 @@ async function syncQueue() {
   try {
     const response = await spotify.request("/me/player/queue");
     if (version !== connectionVersion) return;
-    const next = remember((response?.queue || []).map(x => itemOf(x))).slice(0, 20);
+    if (!Array.isArray(response?.queue)) return;
+    const next = remember(response.queue.map(x => itemOf(x))).slice(0, 20);
     if (next.map(x => x.id).join() !== queue.map(x => x.id).join()) {
       queue = next; render(false, true);
     }
@@ -345,11 +374,19 @@ async function syncQueue() {
 function setPlaying(track, isPlaying, seconds, output = spotify.device, settings = {}) {
   if (!spotify.connected || !track) return;
   const changedTrack = current.id !== track.id;
-  const changed = changedTrack || playing !== isPlaying || volume !== (settings.volume ?? volume) ||
+  const changed = changedTrack || track.title !== current.title || track.artist !== current.artist ||
+    track.album !== current.album ||
+    track.art !== current.art || track.duration !== current.duration ||
+    playing !== isPlaying || volume !== (settings.volume ?? volume) ||
     shuffle !== (settings.shuffle ?? shuffle) || repeat !== (settings.repeat ?? repeat);
+  if (changedTrack || (output && output !== spotify.active)) cancelSeek();
   spotify.active = output || "";
   if (isPlaying) recordRecent(track);
-  current = track; playing = isPlaying; position = seconds; updatedAt = performance.now();
+  current = track; playing = isPlaying;
+  if (!pendingSeek && performance.now() >= seekHoldUntil) {
+    position = Number.isFinite(seconds) ? seconds : changedTrack ? 0 : spotifyPosition();
+    updatedAt = performance.now();
+  }
   if (settings.volume !== undefined) volume = settings.volume;
   if (settings.shuffle !== undefined) shuffle = settings.shuffle;
   if (settings.repeat !== undefined) repeat = settings.repeat;
@@ -360,21 +397,106 @@ spotify.error = fail;
 spotify.devicesChanged = () => { if (page === "devices") navigate("devices"); };
 spotify.state = state => {
   if (selected && selected !== "browser" && selected !== spotify.device) return;
-  const track = remember([itemOf(state.track_window.current_track)])[0];
+  if (!selected && spotify.active && spotify.active !== spotify.device) return;
+  const track = itemOf(state.track_window?.current_track);
+  if (!track) return;
+  const knownTrack = known.get(track.id);
+  track.duration = state.duration > 0 ? state.duration / 1000 : track.duration || knownTrack?.duration || 0;
+  if (knownTrack) {
+    track.title ||= knownTrack.title;
+    track.artist ||= knownTrack.artist;
+    track.album ||= knownTrack.album;
+    track.art ||= knownTrack.art;
+  }
+  remember([track]);
+  playbackRevision++;
   setPlaying(track, !state.paused, state.position / 1000);
 };
+function refreshPlayback() {
+  clearTimeout(playbackRefresh);
+  playbackRefresh = setTimeout(syncPlayback, 900);
+}
 async function syncPlayback() {
-  if (!spotify.connected || performance.now() - recentCommandAt < 3500) return;
+  if (!spotify.connected || playbackPoll) return;
   const version = connectionVersion;
+  const revision = playbackRevision;
+  const poll = (async () => {
+    const useLocal = (!selected || selected === "browser") && spotify.device
+      && (!spotify.active || spotify.active === spotify.device);
+    if (useLocal && spotify.player?.getCurrentState) {
+      const local = await spotify.player.getCurrentState().catch(() => null);
+      if (local?.track_window?.current_track) return { local };
+    }
+    return { remote: await spotify.request("/me/player") };
+  })();
+  playbackPoll = poll;
   try {
-    const state = await spotify.request("/me/player");
-    if (!state?.item || version !== connectionVersion) return;
-    if (state.device?.id === spotify.device && spotify.player) return;
+    const { local, remote: state } = await poll;
+    if (version !== connectionVersion || revision !== playbackRevision) return;
+    if (local) {
+      spotify.state(local);
+      return;
+    }
+    if (!state?.item) {
+      if (playing && current.id && performance.now() - recentCommandAt > 3500
+          && (!spotify.device || spotify.active !== spotify.device || spotifyPosition() >= current.duration)) {
+        setPlaying(current, false, Math.min(spotifyPosition(), current.duration), spotify.active);
+      }
+      return;
+    }
+    if (selected && selected !== "browser" && state.device?.id !== selected) return;
+    if (selected === "browser" && state.device?.id !== spotify.device) return;
     const track = remember([itemOf(state.item)])[0];
     setPlaying(track, state.is_playing, (state.progress_ms || 0) / 1000, state.device?.id, {
       shuffle: state.shuffle_state, repeat: state.repeat_state !== "off", volume: state.device?.volume_percent ?? volume,
     });
   } catch { /* A remote device can disappear between polls. */ }
+  finally { if (playbackPoll === poll) playbackPoll = undefined; }
+}
+function cancelSeek() {
+  clearTimeout(seekDelay);
+  pendingSeek = undefined;
+  seekHoldUntil = 0;
+  return seekRequest?.catch(() => {});
+}
+function queueSeek(value) {
+  if (!current.id || current.duration <= 0) return;
+  const seconds = Math.min(Math.max(value, 0), Math.max(0, current.duration - 0.001));
+  pendingSeek = { seconds, version: connectionVersion, track: current.id, device: spotify.active };
+  clearTimeout(seekDelay);
+  seekDelay = setTimeout(sendSeek, 160);
+}
+async function sendSeek() {
+  if (seeking || !pendingSeek) return;
+  const seek = pendingSeek;
+  const valid = () => seek.version === connectionVersion && seek.track === current.id;
+  seeking = true;
+  try {
+    const output = seek.device || await targetDevice();
+    if (!valid() || pendingSeek !== seek || (spotify.active && output !== spotify.active)) return;
+    playbackRevision++;
+    const ms = Math.round(seek.seconds * 1000);
+    seekRequest = output === spotify.device && spotify.player?.seek
+      ? spotify.player.seek(ms)
+      : spotify.request("/me/player/seek" + deviceQuery(output) + "&position_ms=" + ms, "PUT");
+    await seekRequest;
+    if (!valid() || pendingSeek !== seek) return;
+    position = seek.seconds;
+    updatedAt = performance.now();
+    seekHoldUntil = updatedAt + 900;
+    refreshPlayback();
+  } catch (error) {
+    if (valid() && pendingSeek === seek) fail(error);
+  } finally {
+    seekRequest = undefined;
+    seeking = false;
+    if (pendingSeek === seek) pendingSeek = undefined;
+    else if (pendingSeek) {
+      clearTimeout(seekDelay);
+      seekDelay = setTimeout(sendSeek, 160);
+    }
+    tick();
+  }
 }
 
 // Spotify's protected stream never passes through the page, so its spectrum needs the listener to
@@ -459,6 +581,9 @@ document.querySelector("#signin").addEventListener("submit", event => {
 });
 document.querySelector("#disconnect").onclick = () => {
   connectionVersion++;
+  cancelSeek();
+  clearTimeout(playbackRefresh);
+  playbackPoll = undefined;
   spotify.signOut(); sound.release(); selected = ""; known.clear(); demo();
   settings.close(); navigate("home"); render(true, true);
 };
@@ -536,17 +661,9 @@ async function dispatch(action, data) {
     case "transfer": return transfer(data);
     case "seek": {
       const value = Number(data);
+      if (!Number.isFinite(value)) return;
       if (!spotify.connected) { if (audio.getAttribute("src")) audio.currentTime = value; }
-      else {
-        const version = connectionVersion;
-        skipProgressUntil = performance.now() + 700;
-        clearTimeout(seekDelay);
-        seekDelay = setTimeout(() => {
-          if (version !== connectionVersion) return;
-          control("seek", "PUT", "&position_ms=" + Math.round(value * 1000))
-            .then(() => { position = value; updatedAt = performance.now(); }, fail);
-        }, 200);
-      }
+      else queueSeek(value);
       return;
     }
     case "volume": {
@@ -627,7 +744,7 @@ try {
     }).catch(fail);
     syncPlayback();
     spotify.enableBrowser().catch(() => {});
-    setInterval(syncPlayback, 7000);
+    setInterval(syncPlayback, 5000);
   }
 } catch (error) {
   document.querySelector("#loading-message").textContent = error.message + " Reload the page to try again.";

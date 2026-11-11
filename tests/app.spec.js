@@ -129,6 +129,8 @@ test.describe("mocked Spotify integration", () => {
           listeners={}; addListener(n,cb){this.listeners[n]=cb;}
           connect(){window.mockSpotifyPlayer=this;queueMicrotask(()=>this.listeners.ready({device_id:"web-spotife"}));return Promise.resolve(true);}
           disconnect(){}
+          getCurrentState(){return Promise.resolve(window.mockPlaybackState ?? null);}
+          seek(ms){window.mockSeekCalls.push(ms);return Promise.resolve();}
           // Stands in for the protected stream: a tone the page's own audio graph never sees.
           activateElement(){
             if(!this.tone){this.tone=new AudioContext();const o=this.tone.createOscillator();
@@ -152,6 +154,7 @@ test.describe("mocked Spotify integration", () => {
           }
         }
         window.spotifyRequests = [];
+        window.mockSeekCalls = [];
         window.fetch = async (input, options = {}) => {
           const url = new URL(input, location.href);
           if (url.origin !== "https://api.spotify.com") return fetchReal(input, options);
@@ -162,6 +165,11 @@ test.describe("mocked Spotify integration", () => {
           });
           if (url.pathname === "/v1/me/tracks") return Response.json({ items: saved });
           if (url.pathname === "/v1/me/playlists") return Response.json({ items: playlists });
+          if (largeLibrary && url.pathname === "/v1/me/player/next") {
+            window.mockPlaybackState = {
+              track_window: { current_track: saved[2].track }, paused: false, position: 0,
+            };
+          }
           if (url.pathname === "/v1/me/player/pause") {
             if (largeLibrary) {
               window.mockSpotifyPlayer.listeners.player_state_changed({
@@ -193,8 +201,12 @@ test.describe("mocked Spotify integration", () => {
       const dark = await fire(page);
       await press(page, "Play Test Song");
       const request = path => page.evaluate(path => window.spotifyRequests.find(r => r.path === path), path);
+      const initialUris = ["spotify:track:test"];
+      if (mode === "shared") {
+        initialUris.push(...Array.from({ length: 76 }, (_, index) => "spotify:track:library" + (index + 1)));
+      }
       await expect.poll(() => request("/v1/me/player/play")).toMatchObject({
-        params: { device_id: "web-spotife" }, body: { uris: ["spotify:track:test"] },
+        params: { device_id: "web-spotife" }, body: { uris: initialUris },
         authorization: "Bearer test-token",
       });
       await press(page, "Pause");
@@ -206,7 +218,7 @@ test.describe("mocked Spotify integration", () => {
       await press(page, "Play");
       await expect.poll(() => page.evaluate(() => window.spotifyRequests
         .filter(r => r.path === "/v1/me/player/play").map(r => r.body))).toEqual([
-        { uris: ["spotify:track:test"] }, null,
+        { uris: initialUris }, null,
       ]);
       await expect(button(page, "Pause")).toBeAttached();
       await press(page, "Like current track");
@@ -290,6 +302,25 @@ test.describe("mocked Spotify integration", () => {
         await expect(button(page, "Library playlist 48")).toHaveCount(0);
         await press(page, "Show Playlists");
         await expect(button(page, "Library playlist 48")).toBeAttached();
+
+        await page.evaluate(() => {
+          for (const position of [5, 16, 37]) window.spotifyFerroAction("seek", String(position));
+        });
+        await expect.poll(() => page.evaluate(() => window.mockSeekCalls)).toEqual([37000]);
+
+        await page.evaluate(() => {
+          window.mockSpotifyPlayer.listeners.player_state_changed({
+            track_window: { current_track: {
+              type: "track", uri: "spotify:track:library1", name: "Library song 1",
+            } }, paused: false, position: 0, duration: 100000,
+          });
+        });
+        await expect(button(page, "Open Now Playing")).toContainText("Library song 1");
+        await page.evaluate(() => window.spotifyFerroAction("seek", "18"));
+        await expect.poll(() => page.evaluate(() => window.mockSeekCalls)).toEqual([37000, 18000]);
+        await press(page, "Next track");
+        // The SDK does not emit an event for this command. Its state query still refreshes the footer.
+        await expect(button(page, "Open Now Playing")).toContainText("Library song 2");
       }
       await press(page, mode === "shared" ? "Spotify settings" : "Account");
       await button(page, "Sign out").click();
