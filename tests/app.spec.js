@@ -176,6 +176,14 @@ test.describe("mocked Spotify integration", () => {
         method: "DELETE", params: { uris: "spotify:track:test" },
       });
       if (mode === "shared") {
+        const songs = page.getByRole("region", { name: "SONGS", exact: true });
+        const songBar = songs.getByRole("scrollbar");
+        const duration = songs.getByText("1:40", { exact: true }).first();
+        await expect.poll(async () => {
+          const [bar, time] = await Promise.all([songBar.boundingBox(), duration.boundingBox()]);
+          return bar && time ? bar.x - (time.x + time.width) : 0;
+        }).toBeGreaterThanOrEqual(6);
+
         const panes = [
           { x: 110, first: "Library artist 01", last: "Library artist 76" },
           { x: 500, first: "Library playlist 1", last: "Library playlist 48" },
@@ -186,8 +194,19 @@ test.describe("mocked Spotify integration", () => {
           await expect(button(page, last)).toHaveCount(0);
         }
         for (const [index, { x, last }] of panes.entries()) {
-          await page.mouse.move(x, 450);
-          await page.mouse.wheel(0, 6500);
+          if (index === 2) {
+            const thumb = songBar.locator('[data-ferroui-name="VerticalThumb"]');
+            await expect(thumb).toBeAttached();
+            const [track, handle] = await Promise.all([songBar.boundingBox(), thumb.boundingBox()]);
+            const centerX = handle.x + handle.width / 2;
+            await page.mouse.move(centerX, handle.y + handle.height / 2);
+            await page.mouse.down();
+            await page.mouse.move(centerX, track.y + track.height - 1, { steps: 8 });
+            await page.mouse.up();
+          } else {
+            await page.mouse.move(x, 450);
+            await page.mouse.wheel(0, 6500);
+          }
           await expect(button(page, last)).toBeAttached();
           for (const [otherIndex, other] of panes.entries()) {
             if (otherIndex > index) {

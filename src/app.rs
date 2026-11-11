@@ -2,8 +2,10 @@ use crate::effects;
 
 use ferroui_base::{
     BoxedValue, CornerRadius, FerroObjectImpl, Ref, RelativePoint, RelativeUnit, Thickness,
-    WeakRef, ferro_class, ferro_impl_classes,
-    input::InputElement,
+    WeakRef,
+    data::{BindingMode, ReflectionBinding, TemplateBinding},
+    ferro_class, ferro_impl_classes,
+    input::{InputElement, gesture_recognizers::ScrollGestureRecognizer},
     instantiate,
     layout::{HorizontalAlignment as H, Orientation, VerticalAlignment as V},
     media::{
@@ -17,15 +19,16 @@ use ferroui_base::{
 use ferroui_browser::{BrowserAccessibilityMode, BrowserAppBuilder, BrowserPlatformOptions};
 use ferroui_controls::{
     AppBuilder, Application, ApplicationImpl, ApplicationImplExt, Border, Button,
-    ColumnDefinitions, Control, Grid, Image, ItemsSource, NewApplication, RowDefinitions,
-    ScrollViewer, Slider, StackPanel, TextBlock, TextBox, ToolTip,
+    ColumnDefinitions, ContentControl, Control, Grid, Image, ItemsSource, NewApplication,
+    RepeatButton, RowDefinitions, ScrollViewer, Slider, StackPanel, TextBlock, TextBox, ToolTip,
     automation::AutomationProperties,
     media::{
         ApplicationTheme, RevealBackgroundBrush, RevealBorderBrush, RevealBrush, RevealBrushState,
     },
-    primitives::ScrollBarVisibility,
+    presenters::{ContentPresenter, ScrollContentPresenter},
+    primitives::{RangeBase, ScrollBar, ScrollBarVisibility, TemplatedControl, Thumb, Track},
     shapes::Path,
-    templates::FuncDataTemplate,
+    templates::{FuncControlTemplate, FuncDataTemplate, FuncTemplateNameScopeExtensions},
 };
 use ferroui_controls_repeater::{ItemsRepeater, StackLayout};
 #[cfg(not(target_os = "emscripten"))]
@@ -506,7 +509,162 @@ fn scroll() -> Ref<ScrollViewer> {
     let s = ScrollViewer::new();
     s.set_horizontal_scroll_bar_visibility(ScrollBarVisibility::Disabled);
     s.set_vertical_scroll_bar_visibility(ScrollBarVisibility::Auto);
+    s.set_template(Some(FuncControlTemplate::for_type::<ScrollViewer>(
+        |viewer, scope| {
+            let layout = grid("*,Auto", "");
+            layout.set_background(viewer.background());
+
+            let presenter = ScrollContentPresenter::new();
+            presenter.set_name(Some("PART_ContentPresenter".into()));
+            presenter.set_background(Some(brush("Transparent")));
+            presenter.set_clip_to_bounds(true);
+            presenter.bind_binding(
+                ContentPresenter::padding_property().as_property(),
+                &TemplateBinding::new(TemplatedControl::padding_property().as_property()),
+            );
+            presenter.bind_binding(
+                ContentPresenter::content_template_property().as_property(),
+                &TemplateBinding::new(ContentControl::content_template_property().as_property()),
+            );
+            let presenter = presenter.register_in_name_scope(&**scope);
+            let gesture = ScrollGestureRecognizer::new();
+            gesture.set_can_vertically_scroll(true);
+            gesture.set_is_scroll_inertia_enabled(viewer.is_scroll_inertia_enabled());
+            for (property, path) in [
+                (
+                    ScrollGestureRecognizer::offset_property().as_property(),
+                    "Offset",
+                ),
+                (
+                    ScrollGestureRecognizer::viewport_property().as_property(),
+                    "Viewport",
+                ),
+                (
+                    ScrollGestureRecognizer::extent_property().as_property(),
+                    "Extent",
+                ),
+            ] {
+                let binding = ReflectionBinding::new(path);
+                binding.set_element_name(Some("PART_ContentPresenter".into()));
+                binding.set_name_scope(Some(Rc::downgrade(&scope.0)));
+                gesture.bind_binding(property, &binding);
+            }
+            presenter.gesture_recognizers().add(gesture);
+            put(&layout, 0, 0, presenter.upcast());
+
+            let bar = ScrollBar::new();
+            bar.set_name(Some("PART_VerticalScrollBar".into()));
+            bar.set_orientation(Orientation::Vertical);
+            bar.set_is_tab_stop(false);
+            bar.set_min_width(0.0);
+            bar.set_width(10.0);
+            bar.set_margin(Thickness::new(6.0, 0.0, 0.0, 0.0));
+            bar.set_template(Some(FuncControlTemplate::for_type::<ScrollBar>(
+                |_, scope| {
+                    let track = Track::new();
+                    track.set_orientation(Orientation::Vertical);
+                    track.set_is_direction_reversed(true);
+                    for (target, source, mode) in [
+                        (
+                            Track::minimum_property().as_property(),
+                            RangeBase::minimum_property().as_property(),
+                            BindingMode::OneWay,
+                        ),
+                        (
+                            Track::maximum_property().as_property(),
+                            RangeBase::maximum_property().as_property(),
+                            BindingMode::OneWay,
+                        ),
+                        (
+                            Track::value_property().as_property(),
+                            RangeBase::value_property().as_property(),
+                            BindingMode::TwoWay,
+                        ),
+                        (
+                            Track::viewport_size_property().as_property(),
+                            ScrollBar::viewport_size_property().as_property(),
+                            BindingMode::OneWay,
+                        ),
+                    ] {
+                        track.bind_binding(target, &TemplateBinding::new(source).with_mode(mode));
+                    }
+
+                    let thumb = Thumb::new();
+                    thumb.set_name(Some("VerticalThumb".into()));
+                    thumb.set_min_height(16.0);
+                    thumb.set_template(Some(FuncControlTemplate::new(|_, _| {
+                        surface("#B3B3B3", 0.0, 0.0).upcast()
+                    })));
+                    track.set_thumb(thumb.register_in_name_scope(&**scope));
+                    track.set_decrease_button(
+                        scroll_repeat("PART_PageUpButton", None).register_in_name_scope(&**scope),
+                    );
+                    track.set_increase_button(
+                        scroll_repeat("PART_PageDownButton", None).register_in_name_scope(&**scope),
+                    );
+
+                    let rail = surface("Transparent", 0.0, 0.0);
+                    rail.set_border_brush(Some(brush("#A6A6A6")));
+                    rail.set_border_thickness(Thickness::new(0.0, 0.0, 1.0, 0.0));
+                    let controls = grid("", "11,*,11");
+                    put(
+                        &controls,
+                        0,
+                        0,
+                        scroll_repeat("PART_LineUpButton", Some(true))
+                            .register_in_name_scope(&**scope)
+                            .upcast(),
+                    );
+                    put(&controls, 0, 1, track.upcast());
+                    put(
+                        &controls,
+                        0,
+                        2,
+                        scroll_repeat("PART_LineDownButton", Some(false))
+                            .register_in_name_scope(&**scope)
+                            .upcast(),
+                    );
+                    rail.set_child(controls);
+                    rail.upcast()
+                },
+            )));
+            put(&layout, 1, 0, bar.register_in_name_scope(&**scope).upcast());
+            layout.upcast()
+        },
+    )));
     s
+}
+fn scroll_repeat(name: &str, arrow_up: Option<bool>) -> Ref<RepeatButton> {
+    let button = RepeatButton::new();
+    button.set_name(Some(name.into()));
+    button.set_focusable(false);
+    button.set_min_width(0.0);
+    button.set_min_height(0.0);
+    button.set_horizontal_alignment(H::Stretch);
+    button.set_vertical_alignment(V::Stretch);
+    button.set_template(Some(FuncControlTemplate::new(move |_, _| {
+        let hit_area = surface("Transparent", 0.0, 0.0);
+        if let Some(up) = arrow_up {
+            let arrow = Path::new();
+            arrow.set_data(
+                Geometry::parse(if up {
+                    "M0 3 L2.5 0 L5 3 Z"
+                } else {
+                    "M0 0 L5 0 L2.5 3 Z"
+                })
+                .ok(),
+            );
+            arrow.set_width(5.0);
+            arrow.set_height(3.0);
+            arrow.set_stretch(Stretch::Uniform);
+            arrow.set_fill(Some(brush("#858585")));
+            arrow.set_horizontal_alignment(H::Center);
+            center(&arrow);
+            hit_area.set_child(arrow);
+        }
+        hit_area.upcast()
+    })));
+    button
 }
 fn build() {
     let (width, host, model) = UI.with(|s| {
@@ -1226,11 +1384,6 @@ impl<T: Clone + PartialEq + 'static> CollectionPane<T> {
     fn new(title: &str, spacing: f64, build: impl Fn(&T) -> Ref<Control> + 'static) -> Self {
         let viewer = scroll();
         viewer.set_is_scroll_chaining_enabled(false);
-        viewer.set_allow_auto_hide(false);
-        viewer.set_background(Some(brush("Transparent")));
-        viewer
-            .resources()
-            .set("ScrollBarThumbBackground", Some(Rc::new(brush("#958892"))));
         AutomationProperties::set_name(&viewer, Some(title));
 
         let repeater = virtual_repeater(spacing, build);
