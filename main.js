@@ -16,7 +16,7 @@ const sections = [
 ];
 const artRequests = new Set();
 let runtime, nav = 0, searchDelay, seekDelay, volumeDelay, position = 0, updatedAt = 0;
-let library = [], liked = new Set(), order = [], queue = [], deviceRows = [], selected = "";
+let library = [], pins = [], recent = [], liked = new Set(), order = [], queue = [], deviceRows = [], selected = "";
 let current = {}, page = "home", detail = "", query = "", title = "", caption = "", status = "";
 let playing = false, shuffle = false, repeat = false, volume = 65, items = [];
 let connectionVersion = 0;
@@ -31,13 +31,13 @@ const remember = xs => xs.filter(Boolean).map(item => (known.set(item.id, item),
 const decorated = item => ({ ...item, liked: liked.has(item.id) });
 const render = (body = true, player = true, reset = false) => {
   if (!runtime) return;
-  runtime.updateModel(JSON.stringify(model()), body || (player && page === "queue"), player, reset);
+  runtime.updateModel(JSON.stringify(model()), body || (player && (page === "home" || page === "queue")), player, reset);
   if (player) tick();
 };
 const model = () => ({
   page, title, caption, detail, query, status, connected: spotify.connected,
   collections: library.map(decorated), items: items.map(decorated), queue: queue.map(decorated),
-  current: decorated(current), playing, shuffle, repeat, volume,
+  pins, recent, current: decorated(current), playing, shuffle, repeat, volume,
 });
 const tick = () => {
   if (!runtime || performance.now() < skipProgressUntil) return;
@@ -51,6 +51,9 @@ const stopDemo = () => { audio.pause(); audio.removeAttribute("src"); audio.load
 function demo() {
   remember([...mixes, ...tracks]);
   library = mixes;
+  pins = read("zunify.demo.pins", mixes.slice(0, 2).map(item => item.id))
+    .map(id => known.get(id)).filter(Boolean).slice(0, 6);
+  recent = [];
   liked = new Set(read("spotifast.demo.liked", [tracks[0].id, tracks[2].id]));
   volume = read("spotifast.volume", 65);
   audio.volume = volume / 100;
@@ -81,7 +84,7 @@ async function navigate(next, id = "", preserveStatus = false) {
   page = next;
   detail = id;
   const target = known.get(id);
-  title = ({ home: "Home", search: "Browse", library: "Your library", liked: "Liked songs",
+  title = ({ home: "Quickplay", search: "Browse", library: "Collection", liked: "Liked songs",
     detail: target?.title || "Collection", devices: "Playback devices", queue: "Queue" })[next];
   caption = "";
   if (!preserveStatus) status = "";
@@ -91,7 +94,7 @@ async function navigate(next, id = "", preserveStatus = false) {
   };
   const saved = () => [...liked].map(id => known.get(id)).filter(Boolean);
   items = next === "home" ? (spotify.connected ? saved().slice(0, 12) : tracks) :
-    next === "library" ? [...remember(spotify.connected ? sections : sections.slice(0, 1)), ...library] :
+    next === "library" ? [...remember(sections), ...(spotify.connected ? saved() : tracks)] :
     next === "liked" ? saved() : next === "search" && !query && !spotify.connected ? mixes : [];
   if (next === "search") caption = query ? "Looking for music…" : "Search for a song, album, artist, or playlist.";
   if (next === "detail") caption = target?.artist || "";
@@ -187,8 +190,14 @@ async function transfer(id) {
   await navigate("devices");
   notice("Playback device selected.");
 }
+function recordRecent(track) {
+  if (track.id && recent[0]?.id !== track.id) {
+    recent = [track, ...recent.filter(item => item.id !== track.id)].slice(0, 6);
+  }
+}
 function demoSource(track, upcoming) {
   current = track;
+  recordRecent(track);
   if (upcoming) { order = upcoming; queue = upcoming.slice(upcoming.indexOf(track) + 1); }
   audio.src = track.audio;
   playing = true;
@@ -224,7 +233,10 @@ async function play(id) {
   if (payload.uris?.length === 0) return;
   await spotify.request("/me/player/play" + deviceQuery(output), "PUT", payload);
   spotify.active = output;
-  if (target.kind === "track") current = target;
+  if (target.kind === "track") {
+    current = target;
+    recordRecent(target);
+  }
   playing = true; position = 0; updatedAt = performance.now();
   render(false, true);
   syncQueue();
@@ -270,7 +282,7 @@ async function like(id) {
   if (spotify.connected) await spotify.request("/me/library?" + new URLSearchParams({ uris: id }), remove ? "DELETE" : "PUT");
   if (remove) liked.delete(id); else liked.add(id);
   if (!spotify.connected) save("spotifast.demo.liked", [...liked]);
-  if (page === "liked" || (page === "home" && spotify.connected)) {
+  if (page === "liked" || (spotify.connected && ["home", "library"].includes(page))) {
     items = [...liked].map(i => known.get(i)).filter(Boolean).slice(0, page === "home" ? 12 : 100);
     caption = items.length ? "" : "Songs you save appear here.";
   }
@@ -306,6 +318,7 @@ function setPlaying(track, isPlaying, seconds, output = spotify.device, settings
   const changed = changedTrack || playing !== isPlaying || volume !== (settings.volume ?? volume) ||
     shuffle !== (settings.shuffle ?? shuffle) || repeat !== (settings.repeat ?? repeat);
   spotify.active = output || "";
+  if (isPlaying) recordRecent(track);
   current = track; playing = isPlaying; position = seconds; updatedAt = performance.now();
   if (settings.volume !== undefined) volume = settings.volume;
   if (settings.shuffle !== undefined) shuffle = settings.shuffle;
@@ -394,14 +407,19 @@ audio.addEventListener("error", () => { if (audio.getAttribute("src")) fail(new 
 async function artwork(url) {
   if (artRequests.has(url)) return;
   const target = new URL(url, location.href);
-  if (target.origin !== location.origin && target.protocol !== "https:") return;
+  if (target.origin !== location.origin && target.protocol !== "https:") {
+    runtime?.setImage(url, new Uint8Array());
+    return;
+  }
   artRequests.add(url);
   try {
     const response = await fetch(target);
     if (!response.ok) throw new Error();
     const bytes = await response.arrayBuffer();
     runtime?.setImage(url, new Uint8Array(bytes));
-  } catch { /* Keep the visual placeholder for unavailable art. */ }
+  } catch {
+    runtime?.setImage(url, new Uint8Array());
+  }
   finally { artRequests.delete(url); }
 }
 async function dispatch(action, data) {
@@ -428,6 +446,15 @@ async function dispatch(action, data) {
       return;
     }
     case "settings": return openSettings();
+    case "pin": {
+      const index = pins.findIndex(item => item.id === data);
+      if (index >= 0) pins.splice(index, 1);
+      else if (pins.length >= 6) return notice("Quickplay holds six pins. Remove one to make room.");
+      else if (known.has(data)) pins.push(known.get(data));
+      if (!spotify.connected) save("zunify.demo.pins", pins.map(item => item.id));
+      render(true, false);
+      return;
+    }
     case "play": return play(data);
     case "toggle": return toggle();
     case "next": return nextTrack();
@@ -505,11 +532,12 @@ const auth = spotify.completeSignIn().catch(error => { status = error.message; a
 try {
   const loaded = await loadModule({ script: "./spotify-ferro.js", element: document.querySelector("#out") });
   if (!loaded) throw new Error("Could not start FerroUI.");
-  await auth;
+  const [instance] = await Promise.all([loaded.createRuntime(), auth]);
   if (spotify.connected) {
     stopDemo(); known.clear(); library = []; items = []; liked.clear(); order = []; queue = []; current = {};
+    pins = []; recent = [];
   }
-  runtime = await loaded.createRuntime();
+  runtime = instance;
   FerroExports.attach(runtime);
   runtime.runMain(JSON.stringify(model()), innerWidth, matchMedia("(prefers-reduced-motion: reduce)").matches);
   document.querySelector("#splash").remove();
