@@ -1,5 +1,7 @@
 use crate::effects;
 
+#[cfg(not(target_os = "emscripten"))]
+use ferroui_base::input::WindowDecorationsElementRole;
 use ferroui_base::{
     BoxedValue, CornerRadius, FerroObjectImpl, Ref, RelativePoint, RelativeUnit, Thickness,
     WeakRef,
@@ -17,6 +19,8 @@ use ferroui_base::{
 };
 #[cfg(target_os = "emscripten")]
 use ferroui_browser::{BrowserAccessibilityMode, BrowserAppBuilder, BrowserPlatformOptions};
+#[cfg(not(target_os = "emscripten"))]
+use ferroui_controls::chrome::WindowDecorationProperties;
 use ferroui_controls::{
     AppBuilder, Application, ApplicationImpl, ApplicationImplExt, Border, Button,
     ColumnDefinitions, ContentControl, Control, Grid, Image, ItemsSource, NewApplication,
@@ -46,6 +50,8 @@ use std::{
 use wasm_bindgen::prelude::*;
 
 const APP_NAME: &str = "Zunify";
+#[cfg(not(target_os = "emscripten"))]
+const DESKTOP_HEADER_HEIGHT: f64 = 48.0;
 const BG: &str = "#130E15";
 const PANEL: &str = "#1E1720";
 const EDGE: &str = "#382C37";
@@ -116,6 +122,8 @@ struct Ui {
     nav: Vec<(&'static str, Ref<TextBlock>)>,
     footer: Option<Ref<Border>>,
     chrome: Option<Ref<Border>>,
+    #[cfg(not(target_os = "emscripten"))]
+    caption_area: Option<WeakRef<Border>>,
     transport: Option<Ref<Border>>,
     fire: Option<Rc<effects::TransportFire>>,
     account_label: Option<Ref<TextBlock>>,
@@ -171,6 +179,9 @@ impl ApplicationImpl for App {
         this.set_name(Some(APP_NAME.into()));
         this.set_requested_theme_variant(Some(ThemeVariant::dark()));
         this.styles().add(WinUITheme::new().as_style());
+        #[cfg(not(target_os = "emscripten"))]
+        this.resources()
+            .set("WindowCaptionBackground", Some(Rc::new(brush("#00000000"))));
         for (key, ink) in [
             ("SliderTrackValueFill", ACCENT),
             ("SliderTrackValueFillPointerOver", "#FF86BA"),
@@ -223,53 +234,31 @@ impl ApplicationImpl for App {
 #[cfg(not(target_os = "emscripten"))]
 fn install_desktop_title_bar(window: &Ref<ferroui_controls::Window>, shell: Ref<Border>) {
     use ferroui_controls::{
-        TitleBar, Window, WindowState,
+        Window, WindowState,
         chrome::{TitleBarDecorations, WindowDrawnDecorations},
     };
 
-    const TITLE_BAR_HEIGHT: f64 = 32.0; // WinUI's compact title bar height in DIPs.
-
-    let title_bar = TitleBar::new();
-    title_bar.set_title(APP_NAME);
-    title_bar.set_background(Some(brush("#241A25")));
-    title_bar.resources().set(
-        "TitleBarTitleMargin",
-        Some(Rc::new(Thickness::new(10.0, 0.0, 8.0, 0.0))),
-    );
-
-    let root = grid("", "Auto,*");
-    root.set_clip_to_bounds(true);
-    put(&root, 0, 0, title_bar.clone().upcast());
-    put(&root, 0, 1, shell.upcast());
-    if !UI.with(|ui| ui.borrow().reduced) {
-        add_reveal_light(&root, 2);
-    }
-
-    window.set_extend_client_area_title_bar_height_hint(TITLE_BAR_HEIGHT);
+    window.set_extend_client_area_title_bar_height_hint(DESKTOP_HEADER_HEIGHT);
     window.set_extend_client_area_to_decorations_hint(true);
-    window.set_content(Some(Control::boxed(root.clone())));
+    window.set_content(Some(Control::boxed(shell.clone())));
 
     let decorations = WindowDrawnDecorations::get_title_bar_decorations(window);
-    let (window_ref, root_ref, bar_ref) = (window.downgrade(), root.downgrade(), title_bar.downgrade());
+    let (window_ref, shell_ref) = (window.downgrade(), shell.downgrade());
     let update_chrome = move || {
-        let (Some(window), Some(root), Some(bar)) =
-            (window_ref.upgrade(), root_ref.upgrade(), bar_ref.upgrade())
-        else {
+        let (Some(window), Some(shell)) = (window_ref.upgrade(), shell_ref.upgrade()) else {
             return;
         };
-        let show_title = window.is_extended_into_window_decorations()
+        let unified = window.is_extended_into_window_decorations()
             && window.window_state() != WindowState::FullScreen;
         let margin = window.window_decoration_margin();
-        bar.set_is_visible(show_title);
-        if show_title {
-            bar.set_min_height(margin.top);
-            root.set_margin(Thickness::new(margin.left, 0.0, margin.right, margin.bottom));
+        if unified {
+            shell.set_margin(Thickness::new(margin.left, 0.0, margin.right, margin.bottom));
             WindowDrawnDecorations::set_title_bar_decorations(
                 &window,
                 decorations & !TitleBarDecorations::TITLE,
             );
         } else {
-            root.set_margin(margin);
+            shell.set_margin(margin);
             WindowDrawnDecorations::set_title_bar_decorations(&window, decorations);
         }
     };
@@ -283,6 +272,31 @@ fn install_desktop_title_bar(window: &Ref<ferroui_controls::Window>, shell: Ref<
             update_chrome();
         }
     }));
+
+    // The toolkit-drawn caption buttons report their insets after layout.
+    let window = window.downgrade();
+    shell
+        .layout_updated(move || {
+            let Some(window) = window.upgrade() else { return };
+            let area = UI.with(|ui| ui.borrow().caption_area.as_ref().and_then(WeakRef::upgrade));
+            if let Some(area) = area {
+                let insets = window.caption_button_insets();
+                if area.padding() != insets {
+                    area.set_padding(insets);
+                }
+                let role = if window.is_extended_into_window_decorations()
+                    && window.window_state() != WindowState::FullScreen
+                {
+                    WindowDecorationsElementRole::TitleBar
+                } else {
+                    WindowDecorationsElementRole::None
+                };
+                if WindowDecorationProperties::get_element_role(&area) != role {
+                    WindowDecorationProperties::set_element_role(&area, role);
+                }
+            }
+        })
+        .detach();
 }
 
 fn create_shell() -> Ref<Border> {
@@ -750,7 +764,16 @@ fn build() {
         (s.width, s.shell.clone().unwrap(), s.model.clone())
     });
     let mobile = width < 790.0;
-    let root = grid("", if mobile { "99,*,77" } else { "76,*,86" });
+    let root = grid(
+        "",
+        if mobile {
+            "99,*,77"
+        } else if cfg!(target_os = "emscripten") {
+            "76,*,86"
+        } else {
+            "48,*,86"
+        },
+    );
     root.set_clip_to_bounds(true);
 
     let main = scroll();
@@ -789,14 +812,13 @@ fn build() {
     transport.set_child(layers);
     put(&root, 0, 2, transport.clone().upcast());
 
-    #[cfg(target_os = "emscripten")]
-    let reveal = (!UI.with(|ui| ui.borrow().reduced)).then(|| add_reveal_light(&root, 3));
+    let _reveal = (!UI.with(|ui| ui.borrow().reduced)).then(|| add_reveal_light(&root, 3));
 
     UI.with(|s| {
         let mut s = s.borrow_mut();
         #[cfg(target_os = "emscripten")]
         {
-            s.reveal = reveal;
+            s.reveal = _reveal;
         }
         s.fire = Some(effects::TransportFire::new(&backdrop, s.reduced));
         s.body = Some(body);
@@ -811,7 +833,8 @@ fn build() {
 }
 
 fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
-    let top = grid("7,*", "");
+    let compact_desktop = mobile && cfg!(not(target_os = "emscripten"));
+    let top = grid("7,*", if compact_desktop { "48,*" } else { "" });
     let stripe = surface(ACCENT, 0.0, 0.0);
     let fill = LinearGradientBrush::new();
     fill.set_end_point(RelativePoint::new(0.0, 1.0, RelativeUnit::Relative));
@@ -821,12 +844,12 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
         .add(GradientStop::with_color_and_offset(color("#FF6F20"), 1.0));
     stripe.set_background(Some(fill.into()));
     stripe.set_vertical_alignment(V::Center);
-    stripe.set_height(50.0);
+    stripe.set_height(if cfg!(target_os = "emscripten") { 50.0 } else { 32.0 });
     put(&top, 0, 0, stripe.upcast());
 
     let g = grid(
         if mobile { "*,Auto" } else { "Auto,*,Auto" },
-        if mobile { "49,42" } else { "" },
+        if mobile && !compact_desktop { "49,42" } else { "" },
     );
     g.set_margin(Thickness::new(
         if mobile { 7.0 } else { 20.0 },
@@ -856,6 +879,8 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
         ));
         navigation.children().add(tab.upcast::<Control>());
     }
+    #[cfg(not(target_os = "emscripten"))]
+    WindowDecorationProperties::set_element_role(&navigation, WindowDecorationsElementRole::User);
     put(&g, 0, 0, navigation.upcast());
 
     let search = TextBox::new();
@@ -875,10 +900,10 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
             send("query", &search.text().unwrap_or_default());
         }
     });
-    if mobile {
+    if mobile && !compact_desktop {
         Grid::set_column_span(&search, 2);
         put(&g, 0, 1, search.clone().upcast());
-    } else {
+    } else if !mobile {
         put(&g, 1, 0, search.clone().upcast());
     }
     UI.with(|ui| ui.borrow_mut().account_label = None);
@@ -901,8 +926,27 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
         UI.with(|ui| ui.borrow_mut().account_label = Some(label.clone()));
         button(name, label.upcast(), false, || send("settings", "")).upcast::<Control>()
     });
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        WindowDecorationProperties::set_element_role(&search, WindowDecorationsElementRole::User);
+        WindowDecorationProperties::set_element_role(&tools, WindowDecorationsElementRole::User);
+    }
     put(&g, if mobile { 1 } else { 2 }, 0, tools.upcast());
+    #[cfg(target_os = "emscripten")]
     put(&top, 1, 0, g.upcast());
+    #[cfg(not(target_os = "emscripten"))]
+    {
+        let caption = surface("#00000000", 0.0, 0.0);
+        if compact_desktop {
+            search.set_margin(Thickness::new(7.0, 0.0, 28.0, 0.0));
+            caption.set_child(search.clone());
+            put(&top, 1, 1, g.upcast());
+        } else {
+            caption.set_child(g);
+        }
+        put(&top, 1, 0, caption.clone().upcast());
+        UI.with(|ui| ui.borrow_mut().caption_area = Some(caption.downgrade()));
+    }
     UI.with(|ui| {
         let mut ui = ui.borrow_mut();
         ui.search = Some(search);
@@ -2111,7 +2155,12 @@ fn refresh(body: bool, playback: bool, animate: bool) {
         });
     let collection = is_collection(&m.page);
     if body {
-        LIGHT_PAGE.set(collection);
+        let _was_collection = LIGHT_PAGE.replace(collection);
+        #[cfg(not(target_os = "emscripten"))]
+        if _was_collection != collection && let Some(app) = Application::current() {
+            app.resources()
+                .set("WindowCaptionForeground", Some(Rc::new(brush(TEXT))));
+        }
         for shell in [chrome, transport].into_iter().flatten() {
             shell.set_background(Some(brush(BG)));
         }
