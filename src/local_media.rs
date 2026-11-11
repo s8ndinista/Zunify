@@ -368,7 +368,19 @@ mod tests {
             std::env::temp_dir().join(format!("zunify-music-{:x}", u64::from_ne_bytes(suffix)));
         fs::create_dir(&path).unwrap();
         let root = TempFolder(path);
-        let sample = Path::new(env!("CARGO_MANIFEST_DIR")).join("wwwroot/audio/sample-1.wav");
+        let mut sample = b"RIFF".to_vec();
+        sample.extend(16_036_u32.to_le_bytes());
+        sample.extend(b"WAVEfmt ");
+        sample.extend(16_u32.to_le_bytes());
+        sample.extend(1_u16.to_le_bytes()); // PCM
+        sample.extend(1_u16.to_le_bytes()); // Mono
+        sample.extend(8_000_u32.to_le_bytes());
+        sample.extend(16_000_u32.to_le_bytes());
+        sample.extend(2_u16.to_le_bytes());
+        sample.extend(16_u16.to_le_bytes());
+        sample.extend(b"data");
+        sample.extend(16_000_u32.to_le_bytes());
+        sample.resize(sample.len() + 16_000, 0);
         let mut expected = Vec::new();
         for relative in [
             "Single.wav",
@@ -377,7 +389,7 @@ mod tests {
         ] {
             let track = root.0.join(relative);
             fs::create_dir_all(track.parent().unwrap()).unwrap();
-            fs::copy(&sample, &track).unwrap();
+            fs::write(&track, &sample).unwrap();
             expected.push(track);
         }
         fs::write(root.0.join("Artist/notes.txt"), "not music").unwrap();

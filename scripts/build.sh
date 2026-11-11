@@ -12,7 +12,7 @@ cargo build --locked --target wasm32-unknown-emscripten --profile browser
 browser=vendor/FerroUI/src/Browser/FerroUI.Browser
 (cd "$browser/webapp" && npm ci --ignore-scripts && npm run build)
 out="${CARGO_TARGET_DIR:-target}/wasm32-unknown-emscripten/browser"
-rm -rf dist/snippets
+rm -rf dist
 mkdir -p dist
 cp -R wwwroot/. dist/
 npm exec --offline -- esbuild wwwroot/local-media.js --bundle --platform=browser --format=esm --minify --outfile=dist/local-media.js

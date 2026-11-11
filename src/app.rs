@@ -97,6 +97,13 @@ pub(crate) struct Model {
     pub(crate) connected: bool,
     pub(crate) items: Vec<Item>,
     pub(crate) collections: Vec<Item>,
+    pub(crate) collection_art: Vec<String>,
+    #[cfg(target_os = "emscripten")]
+    pub(crate) folder_name: String,
+    #[cfg(target_os = "emscripten")]
+    pub(crate) folder_notice: String,
+    #[cfg(target_os = "emscripten")]
+    pub(crate) folder_can_rescan: bool,
     pub(crate) queue: Vec<Item>,
     pub(crate) liked_music: Vec<Item>,
     pub(crate) recent: Vec<Item>,
@@ -648,7 +655,7 @@ fn playback_menu(
 }
 
 fn queueable_collection(item: &Item) -> bool {
-    matches!(item.kind.as_str(), "album" | "artist") || item.id.starts_with("mix:")
+    matches!(item.kind.as_str(), "album" | "artist") || item.id.starts_with("local:playlist:")
 }
 fn pill(name: &str, glyph: &str, primary: bool, code: &'static str, arg: &str) -> Ref<Button> {
     let ink = if primary { "#220E19" } else { TEXT };
@@ -958,7 +965,7 @@ fn build() {
         surface_view("#01000000", 0.0, 0.0)
             .is_hit_test_visible(false)
             .vertical_alignment(V::Bottom)
-            .height(62.0),
+            .height(74.0),
     );
     let transport = mount(
         surface_view(BG, 0.0, 0.0)
@@ -1246,14 +1253,14 @@ fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
             tiles * 0.65,
         ));
         new_music.children().add(mosaic.upcast::<Control>());
-        let play = pill("Play mix", "play", true, "play", &featured.id);
+        let play = pill("Play", "play", true, "play", &featured.id);
         play.set_horizontal_alignment(H::Left);
         new_music.children().add(play.upcast::<Control>());
     }
     if m.collections.is_empty() {
-        new_music.children().add(
-            label("Music from your collection appears here.", 12.0, MUTED).upcast::<Control>(),
-        );
+        let import = pill("Open local music", "library", true, "navigate", "local");
+        import.set_horizontal_alignment(H::Left);
+        new_music.children().add(import.upcast::<Control>());
     }
     let history = stack(8.0);
     history
@@ -1291,25 +1298,6 @@ fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         );
     }
     content.children().add(sections.upcast::<Control>());
-    if !m.connected {
-        let mixes = stack(8.0);
-        mixes.set_horizontal_alignment(if mobile { H::Left } else { H::Center });
-        mixes
-            .children()
-            .add(metro_title("mixes", 28.0).upcast::<Control>());
-        let line = row(5.0);
-        for mix in m.collections.iter().take(4) {
-            let title = format!("Play {}", mix.title);
-            let id = mix.id.clone();
-            let art = cover(&mix.art, tiles * 0.68, 0.0);
-            art.set_width(tiles * 0.68);
-            let tile = button(&title, art.upcast(), false, move || send("play", &id));
-            tile.set_padding(Thickness::uniform(0.0));
-            line.children().add(tile.upcast::<Control>());
-        }
-        mixes.children().add(line.upcast::<Control>());
-        content.children().add(mixes.upcast::<Control>());
-    }
     if !m.status.is_empty() {
         let message = label(&m.status, 13.0, ACCENT);
         message.set_text_wrapping(TextWrapping::Wrap);
@@ -1440,7 +1428,13 @@ fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
     track_row(item, index, compact, None)
 }
 
-fn track_row(item: &Item, index: usize, compact: bool, editable_queue: Option<usize>) -> Ref<Control> {
+fn track_row(
+    item: &Item,
+    index: usize,
+    compact: bool,
+    editable_queue: Option<usize>,
+) -> Ref<Control> {
+    let playlist_action = cfg!(target_os = "emscripten") && item.id.starts_with("local:track:");
     let light = surface("Transparent", 0.0, 0.0);
     reveal(&light);
     let g = grid(
@@ -1448,7 +1442,7 @@ fn track_row(item: &Item, index: usize, compact: bool, editable_queue: Option<us
             "*,35,29,29,29"
         } else if compact {
             "*,35"
-        } else if item.id.starts_with("spotify:") {
+        } else if item.id.starts_with("spotify:") || playlist_action {
             "*,35,35,35,42"
         } else {
             "*,35,35,48"
@@ -1557,6 +1551,17 @@ fn track_row(item: &Item, index: usize, compact: bool, editable_queue: Option<us
                 .upcast(),
             );
             4
+        } else if playlist_action {
+            let add = action(
+                "Add to playlist",
+                "library",
+                MUTED,
+                "local-playlist",
+                &item.id,
+            );
+            ToolTip::set_tip(&add, Some(Rc::new("Add to playlist".to_owned())));
+            put(&g, 3, 0, add.upcast());
+            4
         } else {
             3
         };
@@ -1570,7 +1575,7 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     if m.page == "home" {
         return quickplay(m, width, animate);
     }
-    if m.page == "queue" {
+    if matches!(m.page.as_str(), "queue" | "local-queue") {
         return now_playing(m, width, animate);
     }
     let mobile = width < 790.0;
@@ -1685,13 +1690,32 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
                 actions
                     .children()
                     .add(pill("Play all", "play", true, "play", "").upcast::<Control>());
-                if ["spotify:album:", "spotify:artist:", "mix:"]
-                    .iter().any(|prefix| m.detail.starts_with(prefix))
+                if [
+                    "spotify:album:",
+                    "spotify:artist:",
+                    "local:album:",
+                    "local:playlist:",
+                ]
+                .iter()
+                .any(|prefix| m.detail.starts_with(prefix))
                 {
                     actions.children().add(
                         pill("Add to queue", "plus", false, "enqueue", &m.detail).upcast::<Control>(),
                     );
                 }
+            }
+            #[cfg(target_os = "emscripten")]
+            if m.detail.starts_with("local:playlist:") {
+                actions.children().add(
+                    pill(
+                        "Edit playlist",
+                        "library",
+                        false,
+                        "local-playlist",
+                        &m.detail,
+                    )
+                    .upcast::<Control>(),
+                );
             }
             if m.detail.starts_with("spotify:") {
                 actions.children().add(
@@ -1816,6 +1840,10 @@ struct CollectionView {
     selected_artist: RefCell<Option<String>>,
     cols: usize,
     local: bool,
+    #[cfg(target_os = "emscripten")]
+    folder_status: Option<Ref<TextBlock>>,
+    #[cfg(target_os = "emscripten")]
+    rescan: Option<Ref<Button>>,
 }
 
 impl CollectionView {
@@ -1830,7 +1858,7 @@ impl CollectionView {
             2
         };
         let inset = if compact { 16.0 } else { 44.0 };
-        let root = grid_view("", "Auto,Auto,Auto,Auto,*")
+        let root = grid_view("", "Auto,Auto,Auto,Auto,Auto,*")
             .margin(Thickness::new(inset, 16.0, inset, 16.0))
             .max_width(1370.0);
 
@@ -1859,10 +1887,22 @@ impl CollectionView {
                 if compact { 10.0 } else { 20.0 },
             ));
         filters = if local {
-            filters.children((
-                pill("Choose music folder", "library", true, "import-folder", ""),
-                pill("Collection", "library", false, "navigate", "library"),
-            ))
+            let filters =
+                filters.child(pill("Collection", "library", false, "navigate", "library"));
+            #[cfg(not(target_os = "emscripten"))]
+            let filters = filters.child(pill(
+                "Choose music folder",
+                "library",
+                true,
+                "import-folder",
+                "",
+            ));
+            #[cfg(target_os = "emscripten")]
+            let filters = filters.children((
+                pill("New playlist", "plus", false, "local-playlist", ""),
+                pill("Local queue", "queue", false, "navigate", "local-queue"),
+            ));
+            filters
         } else {
             filters.children((
                 pill("Liked songs", "heart", false, "navigate", "liked"),
@@ -1876,10 +1916,46 @@ impl CollectionView {
         }
         let root = root.child(filters);
 
+        #[cfg(target_os = "emscripten")]
+        let (root, folder_status, rescan) = if local {
+            let description = mount(text_view("", 12.0, MUTED).text_wrapping(TextWrapping::Wrap));
+            let rescan = pill("Rescan folder", "library", false, "rescan-folder", "");
+            let panel = surface_view("#F9E8F1", 12.0, 0.0)
+                .grid_row(2)
+                .border_brush(brush("#C23B80"))
+                .border_thickness(Thickness::uniform(1.0))
+                .margin(Thickness::new(0.0, 0.0, 0.0, 10.0))
+                .child(
+                    ui::stack_panel().spacing(5.0).children((
+                        text_view("Drop your music folder here", 17.0, TEXT)
+                            .font_weight(FontWeight::SemiBold),
+                        description.clone(),
+                        ui::wrap_panel()
+                            .item_spacing(4.0)
+                            .line_spacing(4.0)
+                            .children((
+                                pill("Choose music folder", "library", false, "import-folder", ""),
+                                rescan.clone(),
+                            )),
+                    )),
+                );
+            (root.child(panel), Some(description), Some(rescan))
+        } else {
+            (root, None, None)
+        };
+
         let artists = CollectionPane::new("ARTISTS", 1.0, artist_button);
-        let playlists = CollectionPane::new(if local { "ALBUMS" } else { "PLAYLISTS" }, 8.0, move |chunk: &Vec<Item>| {
-            collection_card_row(chunk, cols)
-        });
+        let playlists = CollectionPane::new(
+            if local && cfg!(target_os = "emscripten") {
+                "ALBUMS & PLAYLISTS"
+            } else if local {
+                "ALBUMS"
+            } else {
+                "PLAYLISTS"
+            },
+            8.0,
+            move |chunk: &Vec<Item>| collection_card_row(chunk, cols),
+        );
         let songs = CollectionPane::new("SONGS", 2.0, |(index, item)| track(item, *index, false));
         let playlist_empty = collection_empty(&playlists.host, if local { "Tagged albums appear here." } else { "Your playlists appear here." });
         let song_empty = collection_empty(&songs.host, "No songs to show.");
@@ -1921,7 +1997,7 @@ impl CollectionView {
         }
         let root = if compact {
             tab_row.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
-            Grid::set_row(&tab_row, 2);
+            Grid::set_row(&tab_row, 3);
             root.child(tab_row)
         } else {
             root
@@ -1930,9 +2006,9 @@ impl CollectionView {
             text_view("", 13.0, "#BA1267")
                 .text_wrapping(TextWrapping::Wrap)
                 .margin(Thickness::new(0.0, 0.0, 0.0, 10.0))
-                .grid_row(3),
+                .grid_row(4),
         );
-        Grid::set_row(&catalog, 4);
+        Grid::set_row(&catalog, 5);
         let root = mount(root.children((status.clone(), catalog)));
 
         let view = Self {
@@ -1947,6 +2023,10 @@ impl CollectionView {
             selected_artist: RefCell::default(),
             cols,
             local,
+            #[cfg(target_os = "emscripten")]
+            folder_status,
+            #[cfg(target_os = "emscripten")]
+            rescan,
         };
         view.show_pane(if local && m.collections.is_empty() { 2 } else { 1 });
         view
@@ -1965,6 +2045,18 @@ impl CollectionView {
     }
 
     fn update(&self, m: &Model) {
+        #[cfg(target_os = "emscripten")]
+        if let (Some(label), Some(rescan)) = (&self.folder_status, &self.rescan) {
+            let text = if m.folder_name.is_empty() {
+                "Drag a folder from Finder or your file manager to import its tracks and subfolders.".to_owned()
+            } else if m.folder_notice.is_empty() {
+                format!("Music folder: {}", m.folder_name)
+            } else {
+                format!("{} · {}", m.folder_name, m.folder_notice)
+            };
+            label.set_text(Some(&text));
+            rescan.set_is_visible(m.folder_can_rescan);
+        }
         self.status.set_text(Some(&m.status));
         self.status.set_is_visible(!m.status.is_empty());
         let selected = UI.with(|ui| ui.borrow().artist_filter.clone());
@@ -2077,6 +2169,53 @@ fn artist_button(artist: &Option<String>) -> Ref<Control> {
     host.upcast()
 }
 
+struct WallArt {
+    covers: Vec<String>,
+    next: usize,
+    random: u64,
+}
+
+impl WallArt {
+    fn new(covers: Vec<String>) -> Self {
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1, |time| time.as_nanos() as u64);
+        let next = covers.len();
+        Self {
+            covers,
+            next,
+            random: seed.max(1),
+        }
+    }
+
+    fn next_cover(&mut self) -> &str {
+        if self.next == self.covers.len() {
+            for index in (1..self.covers.len()).rev() {
+                self.random ^= self.random << 13;
+                self.random ^= self.random >> 7;
+                self.random ^= self.random << 17;
+                self.covers
+                    .swap(index, (self.random % (index as u64 + 1)) as usize);
+            }
+            self.next = 0;
+        }
+        let index = self.next;
+        self.next += 1;
+        &self.covers[index]
+    }
+}
+
+fn fill_art_wall(wall: &Grid, columns: usize, art: &mut WallArt) {
+    wall.children().clear();
+    for row in 0..3 {
+        for column in 0..columns {
+            let cell = cover(art.next_cover(), f64::NAN, 0.0);
+            cell.set_margin(Thickness::uniform(1.0));
+            put(wall, column as i32, row, cell.upcast());
+        }
+    }
+}
+
 fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     let mobile = width < 790.0;
     let stage = grid("", "");
@@ -2095,27 +2234,44 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
 
     let mut seen = std::collections::HashSet::new();
     let covers: Vec<_> = m
-        .collections
+        .collection_art
         .iter()
-        .chain(&m.queue)
-        .chain(&m.recent)
-        .chain(std::iter::once(&m.current))
-        .filter(|item| !item.art.is_empty() && seen.insert(item.art.as_str()))
-        .take(20)
+        .chain(
+            m.collections
+                .iter()
+                .chain(&m.queue)
+                .chain(&m.recent)
+                .chain(std::iter::once(&m.current))
+                .map(|item| &item.art),
+        )
+        .filter(|art| !art.is_empty() && seen.insert(art.as_str()))
+        .cloned()
         .collect();
     if !covers.is_empty() {
         let columns = if mobile { 4 } else { 8 };
         let wall = grid(&vec!["*"; columns].join(","), "*,*,*");
         wall.set_is_hit_test_visible(false);
-        let cell_height = if mobile { 124.0 } else { 160.0 };
-        for row in 0..3 {
-            for column in 0..columns {
-                let item = covers[(row * 3 + column) % covers.len()];
-                let art = cover(&item.art, cell_height, 0.0);
-                art.set_height(f64::NAN);
-                art.set_margin(Thickness::uniform(1.0));
-                put(&wall, column as i32, row as i32, art.upcast());
-            }
+        let mut art = WallArt::new(covers);
+        fill_art_wall(&wall, columns, &mut art);
+        if art.covers.len() > 1 && !UI.with(|ui| ui.borrow().reduced) {
+            use ferroui_base::threading::{DispatcherPriority, DispatcherTimer};
+            let weak = wall.downgrade();
+            let art = RefCell::new(art);
+            DispatcherTimer::run(
+                move || {
+                    let Some(wall) = weak
+                        .upgrade()
+                        .filter(|wall| wall.is_attached_to_visual_tree())
+                    else {
+                        return false;
+                    };
+                    fill_art_wall(&wall, columns, &mut art.borrow_mut());
+                    true
+                },
+                std::time::Duration::from_secs(10),
+                DispatcherPriority::NORMAL,
+            )
+            .detach();
         }
         put(&stage, 0, 0, wall.upcast());
         let tint = surface(BG, 0.0, 0.0);
@@ -2221,8 +2377,23 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     put(&stage, 0, 0, frame.upcast());
     let p = grid("", "Auto,*");
     let q = grid("*,Auto", "");
-    put(&q, 0, 0, strong("Up next", 15.0, TEXT).upcast());
-    let editable_queue = !m.connected || m.current.id.starts_with("local:");
+    put(
+        &q,
+        0,
+        0,
+        strong(
+            if m.page == "local-queue" {
+                "Local queue"
+            } else {
+                "Up next"
+            },
+            15.0,
+            TEXT,
+        )
+        .upcast(),
+    );
+    let editable_queue =
+        m.page == "local-queue" || !m.connected || m.current.id.starts_with("local:");
     if !m.queue.is_empty() && editable_queue {
         put(&q, 1, 0, pill("Clear queue", "remove", false, "queue-clear", "").upcast());
     } else if !m.queue.is_empty() {
@@ -2554,7 +2725,8 @@ fn refresh(body: bool, playback: bool, animate: bool) {
                     view
                 });
                 view.update(&m);
-            } else if bounded_catalog(&m.page) || m.page == "queue" {
+            } else if bounded_catalog(&m.page) || matches!(m.page.as_str(), "queue" | "local-queue")
+            {
                 UI.with(|ui| ui.borrow_mut().collection = None);
                 if let Some(main) = &main {
                     main.set_content(None);
@@ -2631,12 +2803,19 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
     let (connected_changed, body, playback) = UI.with(|ui| {
         let mut ui = ui.borrow_mut();
         let previous = &ui.model;
+        #[cfg(target_os = "emscripten")]
+        let folder_changed = previous.folder_name != model.folder_name
+            || previous.folder_notice != model.folder_notice
+            || previous.folder_can_rescan != model.folder_can_rescan;
+        #[cfg(not(target_os = "emscripten"))]
+        let folder_changed = false;
         let connected_changed = previous.connected != model.connected;
         let body = body
             && (reset
                 || match model.page.as_str() {
                     "library" | "local" => {
-                        previous.page != model.page
+                        folder_changed
+                            || previous.page != model.page
                             || previous.items != model.items
                             || previous.collections != model.collections
                             || previous.status != model.status
@@ -2649,8 +2828,9 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
                             || previous.recent != model.recent
                             || previous.status != model.status
                     }
-                    "queue" => {
+                    "queue" | "local-queue" => {
                         previous.page != model.page
+                            || previous.collection_art != model.collection_art
                             || previous.queue != model.queue
                             || previous.current != model.current
                             || previous.playing != model.playing

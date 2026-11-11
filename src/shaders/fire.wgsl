@@ -54,11 +54,12 @@ fn effect(coord: vec2<f32>) -> vec4<f32> {
     let height = 1.0 - uv.y;
     let power = uniforms.power;
     let peak = smoothstep(0.0, 1.0, center);
-    let crest = 0.060 + 0.32 * peak * peak * power + 0.34 * amplitude * (0.30 + 0.70 * center);
+    let crest = min(0.96, 0.060 + 0.49 * peak * peak * power + amplitude * (0.102 + 0.238 * center + 0.16 * peak * peak));
     let ribbon = 1.0 - smoothstep(0.0, crest, height);
     let haze = (1.0 - smoothstep(0.0, crest + 0.22, height)) * center;
     let alpha = power * (ribbon * (0.12 + center * 0.34 + amplitude * 0.21) + 0.24 * haze);
     let heat = (1.0 - smoothstep(0.0, crest, height)) * (0.18 + 0.68 * center);
     let tint = mix(vec3<f32>(0.99, 0.10, 0.40), vec3<f32>(1.0, 0.31, 0.12), heat);
-    return vec4<f32>(tint * alpha, alpha);
+    let opacity = alpha * mix(1.0, smoothstep(0.0, 0.15, uv.y), peak);
+    return vec4<f32>(tint * opacity, opacity);
 }

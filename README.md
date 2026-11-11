@@ -2,7 +2,7 @@
 
 A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together liked songs, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
 
-The browser and desktop share a Rust interface built with FerroUI’s fluent declarative API. It uses virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and moves at random where it has no way to listen. See [Spectrum](#spectrum). The app opens to a demo library with original covers and six playable samples. You can try it without a Spotify account.
+The browser and desktop share a Rust interface built with FerroUI’s fluent declarative API. It uses virtualized lists, pointer Reveal, compositor keyframes, and SkSL/WGSL effects. A full-width fire effect animates beneath the transport during playback. Sixty-four Fourier spectrum bands of the music that is playing shape the glow, with bass at the center and higher frequencies toward the edges. The app analyzes the audio live wherever it can hear it, and moves at random where it has no way to listen. See [Spectrum](#spectrum). You can import and play local music without a Spotify account.
 
 ## Run the native desktop app
 
@@ -11,7 +11,7 @@ git submodule update --init --recursive
 cargo run --locked
 ```
 
-FerroUI opens a native window and the demo plays through the system audio output. On macOS, run `scripts/bundle-macos.sh` to build a size-optimized, stripped release of [Zunify.app](dist-desktop/Zunify.app) that opens from Finder. Pass `dev` to package a development build. On Linux, install the ALSA development headers required by the audio backend.
+FerroUI opens a native window and plays local music through the system audio output. On macOS, run `scripts/bundle-macos.sh` to build a size-optimized, stripped release of [Zunify.app](dist-desktop/Zunify.app) that opens from Finder. Pass `dev` to package a development build. On Linux, install the ALSA development headers required by the audio backend.
 
 ## Run in the browser
 
@@ -29,7 +29,7 @@ npm run preview
 
 Open [http://127.0.0.1:4173/](http://127.0.0.1:4173/). The setup script provisions the Emscripten, Rust, and wasm-bindgen versions required by the FerroUI pin. If you already have those versions, source that toolchain's environment before running the build. The local preview only binds to the loopback address. To host it for others, serve `dist/` over HTTPS with `.wasm` served as `application/wasm`. A subdirectory works; no server-side Spotify credentials or proxy are needed.
 
-You can also install the browser build from Chrome or Edge’s app menu. It caches the demo for offline use.
+You can also install the browser build from Chrome or Edge’s app menu. It caches the application for offline use.
 
 ## Configure Spotify for listeners
 
@@ -55,7 +55,9 @@ Spotify may authorize the built-in player and still deny it the key needed to pl
 
 ## Local music
 
-Open **Collection → Local music → Choose music folder**, then select the folder itself. In the browser you can also drag the folder from Finder or your file manager onto the Local music page. Use drag and drop if the picker accepts only files. Zunify scans all subfolders and reads tags and embedded covers. If there is no embedded cover, it checks for common image names such as `cover.jpg` and `folder.png`. MP3, FLAC, WAV, Ogg Vorbis and M4A are supported by the desktop player. Browser playback depends on the browser’s codecs. If the browser asks to upload the folder, it is asking for permission to read the files; Zunify imports them locally. Choose the folder again in a new session.
+Open **Collection → Local music**. In the browser, drag your music folder from Finder or your file manager onto **Drop your music folder here**. You can also use **Choose music folder**. Zunify reads tags and covers from the folder and its subfolders. If a browser calls this an upload, it is asking to let Zunify read the files on your device.
+
+The browser restores your track list, likes, local playlists, and local queue between visits. When the browser allows Zunify to keep access to the folder, it checks for additions, edits, and removals in the background. If permission has expired, use **Rescan folder** to grant it again. If your browser only shares files for the current session, drop the folder again to reconnect playback and pick up changes.
 
 Use **Find cover art** on an album without a cover to send its title and artist to MusicBrainz and look up a cover in the [Cover Art Archive](https://musicbrainz.org/doc/Cover_Art_Archive). The cover is kept in the current session. The selected audio files and their tags are read on your device, and Zunify leaves the files as they are.
 
@@ -63,7 +65,7 @@ Use **Find cover art** on an album without a cover to send its title and artist 
 
 The fire follows the music when Zunify has access to the audio samples.
 
-- **Demo.** The app plays the demo itself and analyzes the samples on their way to the output, ahead of the volume control.
+- **Local music.** Zunify analyzes the audio on its way to the output, ahead of the volume control.
 - **Desktop, Spotify.** Zunify analyzes its own playback on the way to the audio output. Playback sent to another device uses the ambient animation.
 - **Browser, Spotify.** Open **Spotify settings** and choose **Show the spectrum for Spotify**, then share the tab with its audio when the browser asks. This needs a Chromium desktop browser, and the browser asks again on each visit.
 
@@ -77,6 +79,6 @@ npx playwright install chromium
 npm test
 ```
 
-The tests run against the built `dist/`. They cover demo playback and its live spectrum, library and queue interaction, search, mobile layout, offline caching, and the Spotify sign-in and player request flow against mocked Spotify endpoints. Live Spotify playback requires the account and app configuration above. `cargo test` covers the analyzer, and `cargo test -- --ignored` plays a bundled sample through the audio output to check the desktop tap.
+The tests run against the built `dist/`. They cover folder import, restoring the browser library, local playback and collections, offline caching, and Spotify sign-in and playback requests against mocked Spotify endpoints. Live Spotify playback requires the account and app configuration above. `cargo test` covers the analyzer, and `cargo test -- --ignored` plays a generated tone through the audio output to check the desktop tap.
 
 FerroUI is pinned as a Git submodule tracking `main`. See [NOTICE.md](NOTICE.md) for the upstream revisions.

@@ -40,7 +40,7 @@ function taggedWave(title, album = "Folder album", cover) {
   format.writeUInt16LE(16, 14);
   const embedded = [];
   if (cover) {
-    const picture = Buffer.concat([Buffer.from([0]), Buffer.from("image/jpeg\0"), Buffer.from([3, 0]), cover]);
+    const picture = Buffer.concat([Buffer.from([0]), Buffer.from("image/png\0"), Buffer.from([3, 0]), cover]);
     const frame = Buffer.alloc(10);
     frame.write("APIC");
     frame.writeUInt32BE(picture.length, 4);
@@ -49,8 +49,12 @@ function taggedWave(title, album = "Folder album", cover) {
     const tag = Buffer.concat([Buffer.from("ID3"), Buffer.from([3, 0, 0]), size, frame, picture]);
     embedded.push(chunk("ID3 ", tag));
   }
+  const pcm = Buffer.alloc(96_000);
+  for (let offset = 0; offset < pcm.length; offset += 2) {
+    pcm.writeInt16LE(Math.round(12_000 * Math.sin(offset * Math.PI * 110 / 8_000)), offset);
+  }
   return chunk("RIFF", Buffer.concat([
-    Buffer.from("WAVE"), chunk("fmt ", format), chunk("data", Buffer.alloc(32_000)),
+    Buffer.from("WAVE"), chunk("fmt ", format), chunk("data", pcm),
     chunk("LIST", Buffer.concat([Buffer.from("INFO"), field("INAM", title), field("IART", "Folder artist"), field("IPRD", album)])),
     ...embedded,
   ]));
@@ -65,13 +69,13 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
   await writeFile(join(secondAlbum, "01.wav"), taggedWave("Song without cover", "Missing cover"));
   const embeddedAlbum = join(folder, "Embedded cover");
   await mkdir(embeddedAlbum);
-  const embeddedCover = await readFile("wwwroot/art/mix-3.jpg");
+  const embeddedCover = await readFile("wwwroot/icon-192.png");
   await writeFile(join(embeddedAlbum, "01.wav"), taggedWave("Song with cover", "Embedded cover", embeddedCover));
   await Promise.all(Array.from({ length: 80 }, (_, index) => {
     const number = String(index + 1).padStart(2, "0");
     return writeFile(join(album, number + ".wav"), taggedWave("Tagged track " + number));
   }));
-  await writeFile(join(album, "cover.jpg"), await readFile("wwwroot/art/mix-1.jpg"));
+  await writeFile(join(album, "cover.png"), await readFile("wwwroot/icon-192.png"));
   await page.addInitScript(() => { window.showDirectoryPicker = undefined; });
   await boot(page);
   await press(page, "Your library");
@@ -120,7 +124,7 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
     } });
   });
   await page.route("https://coverartarchive.org/release-group/**", route => route.fulfill({
-    headers: { "access-control-allow-origin": "*" }, path: "wwwroot/art/mix-2.jpg", contentType: "image/jpeg",
+    headers: { "access-control-allow-origin": "*" }, path: "wwwroot/icon-192.png", contentType: "image/png",
   }));
   await press(page, "Missing cover");
   await press(page, "Find cover art");
@@ -137,15 +141,20 @@ test("imports a music folder, virtualizes its album tracks, and goes back", asyn
 });
 
 test("recovers from a file-only picker by importing a dropped folder recursively", async ({ page }) => {
-  await page.addInitScript(() => { window.showDirectoryPicker = undefined; });
+  await page.addInitScript(() => {
+    window.showDirectoryPicker = undefined;
+    const click = HTMLInputElement.prototype.click;
+    HTMLInputElement.prototype.click = function () {
+      if (!this.webkitdirectory) click.call(this);
+    };
+  });
   await boot(page);
   await press(page, "Your library");
   await press(page, "Local music");
 
-  const picker = await button(page, "Choose music folder").boundingBox();
-  const chooser = page.waitForEvent("filechooser");
-  await page.mouse.click(picker.x + picker.width / 2, picker.y + picker.height / 2);
-  const input = (await chooser).element();
+  await page.evaluate(() => window.spotifyFerroAction("import-folder", ""));
+  const input = page.locator("input[webkitdirectory]");
+  await expect(input).toHaveCount(1);
   // Simulate a browser host that allows a single file even in directory mode.
   await input.evaluate(element => {
     const transfer = new DataTransfer();
@@ -156,11 +165,10 @@ test("recovers from a file-only picker by importing a dropped folder recursively
   await expect(page.locator("#announcement")).toHaveText(/did not receive a folder.*Drag the folder itself/);
 
   // A broken host can also close its picker without delivering change or cancel.
-  const pendingChoice = page.waitForEvent("filechooser");
-  await page.mouse.click(picker.x + picker.width / 2, picker.y + picker.height / 2);
-  await pendingChoice;
+  await page.evaluate(() => window.spotifyFerroAction("import-folder", ""));
+  await expect(input).toHaveCount(1);
 
-  const accepted = await page.locator("#out canvas").first().evaluate((canvas, buffers) => {
+  const accepted = await page.locator("#out canvas").first().evaluate((canvas, files) => {
     const file = (name, bytes) => ({
       name, isFile: true, file: done => done(new File([Uint8Array.from(bytes)], name)),
     });
@@ -172,11 +180,14 @@ test("recovers from a file-only picker by importing a dropped folder recursively
       },
     });
     const music = folder("Music", [folder("Artist", [folder("Album",
-      [file("01.wav", buffers[0])], [file("02.WAV", buffers[1])])])]);
+      [file("01.wav", files[0])], [file("02.WAV", files[1])])])]);
     const transfer = new DataTransfer();
     const item = transfer.items.add(new File([], "Music"));
     Object.defineProperty(item.constructor.prototype, "webkitGetAsEntry", {
       configurable: true, value() { return music; },
+    });
+    Object.defineProperty(item.constructor.prototype, "getAsFileSystemHandle", {
+      configurable: true, value: async () => null,
     });
     return !canvas.dispatchEvent(new DragEvent("drop", { bubbles: true, cancelable: true, dataTransfer: transfer }));
   }, [
@@ -188,96 +199,99 @@ test("recovers from a file-only picker by importing a dropped folder recursively
   await press(page, "Dropped album");
   await expect(button(page, "Play First nested song")).toBeAttached();
   await expect(button(page, "Play Second nested song")).toBeAttached();
+  await boot(page);
+  await expect(button(page, "Play First nested song")).toBeAttached();
+  await expect(page.getByText(/Drop your saved folder again/)).toBeAttached();
 });
 
-test("plays a bundled mix and supports queueing, liking and mobile layout", async ({ page }) => {
-  const errors = [];
-  page.on("pageerror", error => errors.push(error.message));
+test("restores local music before rescanning and keeps its queue, favorites, and playlists", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.showDirectoryPicker = async () => (await navigator.storage.getDirectory()).getDirectoryHandle("Music");
+    if (sessionStorage.getItem("hold-folder-scan")) {
+      const values = FileSystemDirectoryHandle.prototype.values;
+      const wait = new Promise(resolve => { window.resumeFolderScan = resolve; });
+      FileSystemDirectoryHandle.prototype.values = async function* () {
+        await wait;
+        yield* values.call(this);
+      };
+    }
+  });
   await boot(page);
-  await expect(button(page, "Play mix")).toBeAttached();
-  await page.mouse.move(412, 350);
-  const dark = await fire(page);
-  await page.mouse.click(412, 350);
-  await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0.05);
-  // The spectrum is analyzed from the audio as it plays, ahead of the volume control.
-  await expect.poll(lit(page, dark)).toBe(true);
+  await page.evaluate(async songs => {
+    const root = await navigator.storage.getDirectory();
+    const folder = await root.getDirectoryHandle("Music", { create: true });
+    const album = await folder.getDirectoryHandle("Favorites", { create: true });
+    for (const [name, bytes] of songs) {
+      const track = await album.getFileHandle(name, { create: true });
+      const stream = await track.createWritable();
+      await stream.write(Uint8Array.from(bytes));
+      await stream.close();
+    }
+  }, [
+    ["01.wav", Array.from(taggedWave("First song", "Folder album"))],
+    ["02.wav", Array.from(taggedWave("Second song", "Folder album"))],
+  ]);
+  await press(page, "Open local music");
+  await expect(page.getByText("Drop your music folder here", { exact: true })).toBeAttached();
+  await press(page, "Choose music folder");
+  await expect(button(page, "Play First song")).toBeAttached();
+  await press(page, "Save to liked songs");
+  await press(page, "Add to queue", 1);
+  await press(page, "Add to playlist");
+  await page.getByRole("textbox", { name: "Playlist name" }).fill("Road trip");
+  await page.getByRole("button", { name: "Save playlist" }).click();
+  await expect(button(page, "Road trip")).toBeAttached();
+  await press(page, "Local queue");
+  await expect(button(page, "Play Second song")).toBeAttached();
+  await press(page, "Play Second song");
+  await expect(page.locator("audio")).toHaveAttribute("src", /^blob:/);
+  await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0);
   await press(page, "Pause");
-  await expect.poll(() => page.locator("audio").evaluate(audio => audio.paused)).toBe(true);
-  await expect(button(page, "Play")).toBeAttached();
-  await expect.poll(lit(page, dark)).toBe(false);
-  await press(page, "Next track");
-  await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-5/);
-  await press(page, "Like current track");
+  await press(page, "Back");
+  await press(page, "Add to queue", 1);
+  await page.evaluate(async bytes => {
+    const root = await navigator.storage.getDirectory();
+    const folder = await root.getDirectoryHandle("Music");
+    const album = await folder.getDirectoryHandle("Favorites");
+    const track = await album.getFileHandle("00.wav", { create: true });
+    const stream = await track.createWritable();
+    await stream.write(Uint8Array.from(bytes));
+    await stream.close();
+    sessionStorage.setItem("hold-folder-scan", "yes");
+  }, Array.from(taggedWave("New song", "Folder album")));
+  await boot(page);
+  await expect(button(page, "Play First song")).toBeAttached();
+  await expect(button(page, "Play New song")).toHaveCount(0);
+  await expect(button(page, "Road trip")).toBeAttached();
+  await page.evaluate(() => window.resumeFolderScan());
+  await expect(button(page, "Play New song")).toBeAttached();
+  await press(page, "Road trip");
+  await expect(button(page, "Play First song")).toBeAttached();
+  await expect(button(page, "Play New song")).toHaveCount(0);
+  await press(page, "Back");
+  await press(page, "Local queue");
+  await expect(button(page, "Play Second song")).toBeAttached();
   await press(page, "Your library");
   await press(page, "Liked songs");
-  await expect(button(page, "Play Low Orbit").first()).toBeAttached();
-  await press(page, "Add to queue");
-  await press(page, "Now playing");
-  await expect(page.getByText("Up next", { exact: true })).toBeAttached();
-  await expect(button(page, "Play Midnight Signal").first()).toBeAttached();
-  await press(page, "Move Midnight Signal up in queue");
-  await press(page, "Move Midnight Signal up in queue");
-  await press(page, "Next track");
-  await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-1/);
-  await press(page, "Remove Blue Hour from queue");
-  await expect(button(page, "Play Blue Hour")).toHaveCount(0);
-  await press(page, "Clear queue");
-  await expect(page.getByText("Your queue is empty.")).toBeAttached();
-  await press(page, "Your library");
-  const artistQueue = button(page, "Add Glass Meridian to queue");
-  await expect(artistQueue).toBeAttached();
-  const artistAction = await artistQueue.boundingBox();
-  await page.mouse.move(artistAction.x + artistAction.width / 2, artistAction.y + artistAction.height / 2);
-  await page.mouse.click(artistAction.x + artistAction.width / 2, artistAction.y + artistAction.height / 2);
-  await expect(page.locator("#announcement")).toHaveText("Added Glass Meridian to queue");
-  await press(page, "Add Deep Focus to queue");
-  await press(page, "Now playing");
-  await expect(button(page, "Play Low Orbit").first()).toBeAttached();
-  await expect(button(page, "Play A Place Between")).toBeAttached();
-  await expect(button(page, "Play Soft Horizons")).toBeAttached();
-  await page.setViewportSize({ width: 390, height: 780 });
-  await expect(button(page, "Spotify settings")).toBeAttached({ timeout: 15_000 });
-  await expect(button(page, "Your library")).toHaveCount(1);
-  await press(page, "Your library");
-  await expect(button(page, "Deep Focus").first()).toBeAttached();
-  expect(errors).toEqual([]);
+  await expect(button(page, "Play First song")).toBeAttached();
 });
 
-test("search accepts keyboard input and opens matching collections", async ({ page }) => {
-  await boot(page);
-  await page.mouse.click(755, 38);
-  await page.keyboard.type("weightless");
-  await expect(page.getByText("Results in the demo library")).toBeAttached();
-  await expect(button(page, "Weightless")).toHaveCount(1);
-  await expect(button(page, "Play Blue Hour").first()).toBeAttached();
-  await press(page, "Weightless");
-  await expect(button(page, "Play all")).toBeAttached();
-  await press(page, "Play all");
-  await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-3/);
-  await press(page, "Play A Place Between");
-  await press(page, "Like current track");
-  await press(page, "Quickplay");
-  await expect(page.getByText("liked songs", { exact: true })).toBeAttached();
-  await expect(page.getByText("history", { exact: true })).toBeAttached();
-  await expect(button(page, "Play A Place Between").first()).toBeAttached();
-  await boot(page);
-  await expect(button(page, "Play A Place Between").first()).toBeAttached();
-
-});
-
-test("offline install caches the app and demo audio", async ({ page, context }) => {
+test("offline install caches the app without sample audio", async ({ page, context }) => {
   await boot(page);
   await page.evaluate(() => navigator.serviceWorker.ready);
   await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
   const manifest = await page.evaluate(() => fetch("./manifest.webmanifest").then(r => r.json()));
   expect(manifest.name).toBe("Zunify");
   expect(manifest.display).toBe("standalone");
+  const cached = await page.evaluate(async () => (await Promise.all(
+    (await caches.keys()).map(async key => (await caches.open(key)).keys())
+  )).flat().map(request => new URL(request.url).pathname));
+  expect(cached.some(path => path.includes("/audio/sample-") || path.endsWith("/demo-library.json"))).toBe(false);
   await context.setOffline(true);
   try {
     await boot(page);
-    await expect(button(page, "Play mix")).toBeAttached();
-    await page.mouse.click(412, 350);
-    await expect.poll(() => page.locator("audio").evaluate(audio => audio.currentTime)).toBeGreaterThan(0.05);
+    await press(page, "Open local music");
+    await expect(page.getByText("Drop your music folder here", { exact: true })).toBeAttached();
   } finally {
     await context.setOffline(false);
   }
@@ -567,7 +581,7 @@ test.describe("mocked Spotify integration", () => {
       }
       await press(page, mode === "shared" ? "Spotify settings" : "Account");
       await button(page, "Sign out").click();
-      await expect(button(page, "Play mix")).toBeAttached();
+      await expect(button(page, "Open local music")).toBeAttached();
       await expect(page.locator("#settings")).not.toBeVisible();
       await expect(page.locator("#announcement")).toHaveText("Signed out of Spotify in Zunify.");
       const signedOutButton = button(page, mode === "shared" ? "Spotify settings" : "Connect Spotify");

@@ -11,7 +11,6 @@ use ferroui_base::{
     threading::{DispatcherPriority, DispatcherTimer},
 };
 use ferroui_controls::Window;
-use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     cell::RefCell,
@@ -26,36 +25,6 @@ use std::{
 };
 
 pub use spotify::REDIRECT;
-
-const TRACK_AUDIO: [&[u8]; 6] = [
-    include_bytes!("../wwwroot/audio/sample-1.wav"),
-    include_bytes!("../wwwroot/audio/sample-2.wav"),
-    include_bytes!("../wwwroot/audio/sample-3.wav"),
-    include_bytes!("../wwwroot/audio/sample-4.wav"),
-    include_bytes!("../wwwroot/audio/sample-5.wav"),
-    include_bytes!("../wwwroot/audio/sample-6.wav"),
-];
-
-#[derive(Deserialize)]
-struct Demo {
-    tracks: Vec<Item>,
-    mixes: Vec<Mix>,
-}
-
-#[derive(Deserialize)]
-struct Mix {
-    #[serde(flatten)]
-    item: Item,
-    tracks: Vec<String>,
-}
-
-fn demo_audio(id: &str) -> spotify::Result<&'static [u8]> {
-    id.strip_prefix("demo:")
-        .and_then(|number| number.parse::<usize>().ok())
-        .and_then(|index| index.checked_sub(1))
-        .and_then(|index| TRACK_AUDIO.get(index).copied())
-        .ok_or_else(|| "This demo track is unavailable.".into())
-}
 
 enum Update {
     SignedIn,
@@ -159,8 +128,6 @@ impl Network {
 
 struct Desktop {
     model: Model,
-    demo: Demo,
-    demo_liked: HashSet<String>,
     liked: HashSet<String>,
     known: HashMap<String, Item>,
     history: Vec<Item>,
@@ -201,16 +168,12 @@ thread_local! {
 
 impl Desktop {
     fn new() -> Self {
-        let demo: Demo = serde_json::from_str(include_str!("../wwwroot/demo-library.json"))
-            .expect("bundled demo library is valid");
         let mut state = Self {
             model: Model {
                 volume: 65.0,
                 client_id: configured_client().unwrap_or_default(),
                 ..Model::default()
             },
-            demo,
-            demo_liked: ["demo:1".to_owned(), "demo:3".to_owned()].into(),
             liked: HashSet::new(),
             known: HashMap::new(),
             history: Vec::new(),
@@ -244,15 +207,15 @@ impl Desktop {
             position: 0.0,
             position_at: Instant::now(),
         };
-        state.reset_demo();
+        state.reset_playback();
         state
     }
 
-    fn reset_demo(&mut self) {
+    fn reset_playback(&mut self) {
         self.known.clear();
         self.remember_local_files();
         self.file_playback = false;
-        self.liked.clone_from(&self.demo_liked);
+        self.liked.retain(|id| id.starts_with("local:"));
         self.model.page = "home".into();
         self.back_stack.clear();
         self.page_query.clear();
@@ -261,20 +224,13 @@ impl Desktop {
         self.model.detail.clear();
         self.model.status.clear();
         self.model.caption.clear();
-        self.model.items = self.demo.tracks.clone();
-        self.model.collections = self.demo.mixes.iter().map(|mix| mix.item.clone()).collect();
-        self.known.extend(
-            self.model
-                .items
-                .iter()
-                .chain(&self.model.collections)
-                .map(|item| (item.id.clone(), item.clone())),
-        );
+        self.model.items.clear();
+        self.model.collections.clear();
         self.model.recent.clear();
-        self.model.current = self.demo.tracks[0].clone();
-        self.order = self.demo.tracks.clone();
-        self.upcoming = self.order.iter().skip(1).cloned().collect();
-        self.model.queue = self.upcoming.iter().cloned().collect();
+        self.model.current = Item::default();
+        self.order.clear();
+        self.upcoming.clear();
+        self.model.queue.clear();
         self.model.connected = false;
         self.model.connecting = false;
         self.model.playing = false;
@@ -296,6 +252,10 @@ impl Desktop {
         }
         if model.page == "local" {
             model.collections.clone_from(&self.files.albums);
+        }
+        if model.page == "queue" {
+            model.collection_art = self.files.tracks.iter().chain(self.known.values())
+                .filter(|item| !item.art.is_empty()).map(|item| item.art.clone()).collect();
         }
         for item in model
             .items
@@ -526,7 +486,7 @@ impl Desktop {
                 })
             }),
         );
-        self.reset_demo();
+        self.reset_playback();
         self.render(true, true, true);
     }
 
@@ -588,8 +548,7 @@ impl Desktop {
         self.model.status.clear();
         self.model.caption.clear();
         self.model.items = match page {
-            "home" if self.model.connected => self.saved_tracks().into_iter().take(12).collect(),
-            "home" => self.demo.tracks.clone(),
+            "home" => self.saved_tracks().into_iter().take(12).collect(),
             "liked" => self.saved_tracks(),
             "local" => self.files.tracks.clone(),
             "library" => {
@@ -599,26 +558,11 @@ impl Desktop {
                     items.push(section("artists", "Artists", "Followed artists"));
                 }
                 self.remember(&items);
-                items.extend(if self.model.connected {
-                    self.saved_tracks()
-                } else {
-                    self.demo.tracks.clone()
-                });
+                items.extend(self.saved_tracks());
                 items
             }
-            "search" if !self.model.connected => self.search_demo(),
+            "search" if !self.model.connected => self.search_local(),
             "detail" if id.starts_with("local:") => self.files.album_tracks.get(id).cloned().unwrap_or_default(),
-            "detail" if !self.model.connected => self
-                .demo
-                .mixes
-                .iter()
-                .find(|mix| mix.item.id == id)
-                .map_or_else(Vec::new, |mix| {
-                    mix.tracks
-                        .iter()
-                        .filter_map(|id| self.known.get(id).cloned())
-                        .collect()
-                }),
             _ => Vec::new(),
         };
         match page {
@@ -626,9 +570,9 @@ impl Desktop {
             "liked" if self.model.items.is_empty() => self.model.caption = "Tracks you save appear here.".into(),
             "search" if self.model.query.is_empty() => self.model.caption = "Search songs, artists, albums, or playlists.".into(),
             "search" if self.model.connected => self.model.caption = "Looking for music…".into(),
-            "search" => self.model.caption = if self.model.items.is_empty() { "No results in the demo library." } else { "Results in the demo library" }.into(),
+            "search" => self.model.caption = if self.model.items.is_empty() { "No results in your local music." } else { "Local music" }.into(),
             "devices" if self.model.connected => self.model.caption = "Choose a Spotify Connect device.".into(),
-            "devices" => self.model.caption = "The demo plays through this computer’s audio output.".into(),
+            "devices" => self.model.caption = "Local music plays through this computer’s audio output.".into(),
             "detail" => self.model.caption = self.known.get(id).map_or_else(String::new, |item| item.artist.clone()),
             _ => {}
         }
@@ -683,15 +627,12 @@ impl Desktop {
         }
     }
 
-    fn search_demo(&self) -> Vec<Item> {
+    fn search_local(&self) -> Vec<Item> {
         if self.model.query.is_empty() {
-            return self.model.collections.clone();
+            return self.files.albums.clone();
         }
         let query = self.model.query.to_lowercase();
-        self.demo
-            .tracks
-            .iter()
-            .chain(&self.model.collections)
+        self.files.tracks.iter().chain(&self.files.albums)
             .filter(|item| {
                 let text = format!("{} {} {}", item.title, item.artist, item.album).to_lowercase();
                 query.split_whitespace().all(|word| text.contains(word))
@@ -705,19 +646,14 @@ impl Desktop {
             self.audio = Some(Audio::new()?);
         }
         let audio = self.audio.as_ref().unwrap();
-        let imported = item.id.starts_with("local:");
-        if imported {
-            let path = self.files.files.get(&item.id).ok_or("This track is no longer in the selected folder.")?;
-            if let Some(duration) = audio.play_file(path, self.model.volume)? && item.duration == 0.0 {
-                item.duration = duration.as_secs_f64();
-            }
-            if !self.file_playback && self.model.connected && self.model.playing {
-                self.control("pause", Http::Put, &[], None);
-            }
-        } else {
-            audio.play(demo_audio(&item.id)?, self.model.volume)?;
+        let path = self.files.files.get(&item.id).ok_or("This track is no longer in the selected folder.")?;
+        if let Some(duration) = audio.play_file(path, self.model.volume)? && item.duration == 0.0 {
+            item.duration = duration.as_secs_f64();
         }
-        self.file_playback = imported;
+        if !self.file_playback && self.model.connected && self.model.playing {
+            self.control("pause", Http::Put, &[], None);
+        }
+        self.file_playback = true;
         spectrum::set_listening(true);
         self.position = 0.0;
         self.model.playing = true;
@@ -767,47 +703,6 @@ impl Desktop {
             }
             self.start_playback(payload, false);
             return Ok(());
-        }
-        let mix = self.demo.mixes.iter().find(|mix| mix.item.id == target.id);
-        if let Some(mix) = mix {
-            self.order = mix
-                .tracks
-                .iter()
-                .filter_map(|id| self.known.get(id).cloned())
-                .collect();
-            self.upcoming = self.order.iter().skip(1).cloned().collect();
-            self.history.clear();
-            if let Some(first) = self.order.first().cloned() {
-                self.local_play(first)?;
-            }
-        } else {
-            if self.model.page == "queue" {
-                if let Some(index) = self.upcoming.iter().position(|item| item.id == target.id) {
-                    self.upcoming.drain(..=index);
-                }
-            } else {
-                let items: Vec<_> = self
-                    .model
-                    .items
-                    .iter()
-                    .filter(|item| item.kind == "track")
-                    .cloned()
-                    .collect();
-                self.order = if items.iter().any(|item| item.id == target.id) {
-                    items
-                } else {
-                    self.demo.tracks.clone()
-                };
-                self.upcoming = self
-                    .order
-                    .iter()
-                    .skip_while(|item| item.id != target.id)
-                    .skip(1)
-                    .cloned()
-                    .collect();
-                self.history.clear();
-            }
-            self.local_play(target)?;
         }
         Ok(())
     }
@@ -1014,7 +909,6 @@ impl Desktop {
             });
         } else {
             self.apply_like(item, add);
-            self.demo_liked = self.liked.iter().filter(|id| id.starts_with("demo:")).cloned().collect();
         }
     }
 
@@ -1073,16 +967,7 @@ impl Desktop {
             self.status("Play a Spotify track to use its queue.");
             return;
         }
-        if !self.model.connected {
-            if let Some(mix) = self.demo.mixes.iter().find(|mix| mix.item.id == id) {
-                self.upcoming.extend(mix.tracks.iter().filter_map(|id| self.known.get(id).cloned()));
-            } else if let Some(track) = self.known.get(id).filter(|item| item.kind == "track") {
-                self.upcoming.push_back(track.clone());
-            }
-            self.model.queue = self.upcoming.iter().cloned().collect();
-            self.render(false, true, false);
-            return;
-        }
+        if !self.model.connected { return; }
         let Some(target) = self.known.get(id).cloned() else { return };
         let output = self.playback_device().map(str::to_owned);
         self.api(None, false, false, move |session| {
@@ -1315,17 +1200,7 @@ impl Desktop {
     }
 
     fn load_art(&mut self, url: &str) {
-        let bytes: Option<&[u8]> = match url {
-            "art/hero.jpg" => Some(include_bytes!("../wwwroot/art/hero.jpg")),
-            "art/mix-1.jpg" => Some(include_bytes!("../wwwroot/art/mix-1.jpg")),
-            "art/mix-2.jpg" => Some(include_bytes!("../wwwroot/art/mix-2.jpg")),
-            "art/mix-3.jpg" => Some(include_bytes!("../wwwroot/art/mix-3.jpg")),
-            "art/mix-4.jpg" => Some(include_bytes!("../wwwroot/art/mix-4.jpg")),
-            _ => None,
-        };
-        if let Some(bytes) = bytes {
-            app::set_image(url, bytes);
-        } else if self.requested_art.insert(url.to_owned()) {
+        if self.requested_art.insert(url.to_owned()) {
             let _ = self.network.art_requests.send((url.to_owned(), self.files.covers.get(url).cloned()));
         }
     }
@@ -1366,7 +1241,7 @@ impl Desktop {
                 self.position = 0.0;
                 self.known.clear();
                 self.remember_local_files();
-                self.liked.clear();
+                self.liked.retain(|id| id.starts_with("local:"));
                 self.audio = None;
                 self.file_playback = false;
                 spectrum::set_listening(true);
@@ -1404,7 +1279,8 @@ impl Desktop {
                 self.remember(&playlists);
                 self.remember(&saved);
                 self.model.collections = playlists;
-                self.liked = saved.iter().map(|item| item.id.clone()).collect();
+                self.liked.retain(|id| id.starts_with("local:"));
+                self.liked.extend(saved.iter().map(|item| item.id.clone()));
                 let page = self.model.page.clone();
                 if matches!(page.as_str(), "home" | "library" | "liked") {
                     self.navigate(&page, "");

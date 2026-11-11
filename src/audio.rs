@@ -6,7 +6,7 @@ use rodio::{
     ChannelCount, Decoder, DeviceSinkBuilder, MixerDeviceSink, Player, SampleRate, Source,
     source::SeekError,
 };
-use std::{io::Cursor, time::Duration};
+use std::time::Duration;
 
 /// Passes a source through unchanged while feeding a mono mix of it to the analyser.
 ///
@@ -114,14 +114,6 @@ impl Audio {
         })
     }
 
-    /// Replaces whatever the main sink is playing with a bundled recording.
-    pub(crate) fn play(&self, bytes: &'static [u8], volume: f64) -> Result<(), String> {
-        let source = Decoder::try_from(Cursor::new(bytes))
-            .map_err(|error| format!("Could not read demo audio: {error}"))?;
-        self.play_source(source, volume);
-        Ok(())
-    }
-
     pub(crate) fn play_file(&self, path: &std::path::Path, volume: f64) -> Result<Option<Duration>, String> {
         let file = std::fs::File::open(path).map_err(|_| "Could not open this track. Choose its folder again if it moved.")?;
         let source = Decoder::try_from(file).map_err(|_| "This audio file could not be decoded.")?;
@@ -146,14 +138,11 @@ mod tests {
     // cargo test -- --ignored
     #[test]
     #[ignore = "needs an audio output device"]
-    fn bundled_audio_reaches_the_analyser_at_any_volume() {
+    fn audio_reaches_the_analyser_at_any_volume() {
         assert!(spectrum::latest().is_none());
         let audio = Audio::new().unwrap();
-        audio
-            .play(include_bytes!("../wwwroot/audio/sample-1.wav"), 0.0)
-            .unwrap();
-        // The recording fades in over its first second.
-        std::thread::sleep(Duration::from_millis(1500));
+        audio.play_source(rodio::source::SineWave::new(440.0), 0.0);
+        std::thread::sleep(Duration::from_millis(800));
         let bands = spectrum::latest().expect("the mixer feeds the analyser while playing");
         assert!(bands.iter().any(|level| *level > 0.1), "{bands:?}");
         audio.sink.pause();
