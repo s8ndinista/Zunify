@@ -24,6 +24,7 @@ let playing = false, shuffle = false, repeat = false, volume = 65, items = [];
 let connectionVersion = 0;
 let recentCommandAt = -Infinity, seekHoldUntil = 0, pendingSeek, seekRequest, seeking = false;
 let playbackRevision = 0, playbackPoll, playbackRefresh;
+let queueWrite = Promise.resolve();
 const read = (name, fallback) => {
   try { return JSON.parse(localStorage.getItem(name)) ?? fallback; } catch { return fallback; }
 };
@@ -97,6 +98,14 @@ async function loadLibrary() {
   const failure = [playlists, saved].find(x => x.status === "rejected");
   if (failure) fail(failure.reason);
 }
+async function catalogArtistTracks(artist) {
+  const params = new URLSearchParams({
+    q: 'artist:"' + artist.title.replaceAll('"', " ") + '"', type: "track", limit: "10",
+  });
+  const data = await spotify.request("/search?" + params);
+  return (data?.tracks?.items || []).filter(raw => raw?.artists?.some(entry => entry?.uri === artist.id))
+    .map(raw => itemOf(raw, "track")).filter(Boolean);
+}
 async function navigate(next, id = "", preserveStatus = false) {
   const request = ++nav;
   page = next;
@@ -140,7 +149,7 @@ async function navigate(next, id = "", preserveStatus = false) {
         const result = await (albums ? spotify.page("/me/albums?limit=50")
           : spotify.page("/me/following?type=artist&limit=50", 100, "artists"));
         if (request !== nav) return;
-        const found = remember(result.map(x => itemOf(albums ? x.album : x)));
+        const found = remember(result.map(x => itemOf(albums ? x.album : x, albums ? "album" : "artist")));
         set(found, found.length ? target.artist : "Nothing saved here yet.");
       } else if (!spotify.connected) {
         set(target.tracks ?? [], target.artist);
@@ -148,8 +157,8 @@ async function navigate(next, id = "", preserveStatus = false) {
         const [, kind, spotifyId] = id.split(":");
         const paths = { album: `/albums/${spotifyId}/tracks?limit=50`, playlist: `/playlists/${spotifyId}/items?limit=50` };
         if (kind === "artist") {
-          const data = await spotify.request(`/search?${new URLSearchParams({ q: 'artist:"' + target.title + '"', type: "track", limit: "10" })}`);
-          if (request === nav) set(remember(data.tracks.items.map(x => itemOf(x))), "Tracks by " + target.title);
+          const songs = await catalogArtistTracks(target);
+          if (request === nav) set(remember(songs), songs.length ? "Tracks by " + target.title : "No playable tracks found.");
         } else if (paths[kind]) {
           const data = await spotify.page(paths[kind]);
           if (request !== nav) return;
@@ -232,7 +241,7 @@ function demoSource(track, upcoming) {
   });
 }
 function playbackPayload(target) {
-  if (target.kind === "album" || target.kind === "playlist") return { context_uri: target.id };
+  if (["album", "artist", "playlist"].includes(target.kind)) return { context_uri: target.id };
   const list = (page === "queue" ? queue : items).filter(item => item.kind === "track");
   if (target.kind !== "track") return { uris: list.slice(0, 100).map(item => item.id) };
   const index = list.findIndex(item => item.id === target.id);
@@ -257,10 +266,12 @@ async function play(id) {
     const list = items.filter(x => x.kind === "track");
     return demoSource(target, list.includes(target) ? list : tracks);
   }
+  return startSpotifyPlayback(target, playbackPayload(target));
+}
+async function startSpotifyPlayback(target, payload) {
+  if (payload.uris?.length === 0) return;
   const seekInFlight = cancelSeek();
   const version = connectionVersion;
-  const payload = playbackPayload(target);
-  if (payload.uris?.length === 0) return;
   resumeCapture();
   if ((!selected || selected === "browser") && spotify.player) await spotify.player.activateElement();
   const output = await targetDevice();
@@ -337,11 +348,11 @@ async function nextTrack(previous = false, ended = false) {
     const index = order.indexOf(current);
     return demoSource(order[Math.max(0, index - 1)] || tracks[0], order);
   }
-  if (!queue.length && !repeat) {
+  if (!queue.length && repeat) queue = order.slice();
+  if (!queue.length) {
     if (ended) { playing = false; render(false, true); }
     return;
   }
-  if (!queue.length) queue = order.slice();
   const index = shuffle ? Math.floor(Math.random() * queue.length) : 0;
   const [target] = queue.splice(index, 1);
   if (target) return demoSource(target);
@@ -360,15 +371,89 @@ async function like(id) {
   announce(remove ? "Removed from Liked songs" : "Saved to Liked songs");
 }
 async function enqueue(id) {
-  const item = known.get(id);
-  if (!item) return;
-  if (spotify.connected) {
-    const output = spotify.active || await targetDevice();
-    await spotify.request("/me/player/queue" + deviceQuery(output) + "&uri=" + encodeURIComponent(id), "POST");
+  const target = known.get(id);
+  if (!target) return;
+  return enqueueTracks(target);
+}
+function artistAction(name, playNow) {
+  const songs = items.filter(item => item.kind === "track" && item.artist === name);
+  if (!songs.length) return;
+  if (!playNow) return enqueueTracks({ title: name }, songs);
+  status = "";
+  if (!spotify.connected) return demoSource(songs[0], songs);
+  return startSpotifyPlayback(songs[0], { uris: songs.slice(0, 100).map(item => item.id) });
+}
+async function spotifyQueueTracks(target) {
+  if (target.kind === "artist") return catalogArtistTracks(target);
+  if (target.kind === "album") {
+    const match = /^spotify:album:([a-zA-Z0-9]+)$/.exec(target.id);
+    if (!match) return [];
+    const rows = await spotify.page("/albums/" + match[1] + "/tracks?limit=50", Infinity);
+    return rows.map(raw => itemOf(raw, "track")).filter(Boolean)
+      .map(track => ({ ...track, art: target.art, album: target.title }));
   }
-  queue.push(item);
+  return target.kind === "track" ? [target] : [];
+}
+async function enqueueTracks(target, listedTracks) {
+  if (!spotify.connected) {
+    queue.push(...(listedTracks || target.tracks || [target]));
+    render(false, true);
+    announce("Added " + target.title + " to queue");
+    return;
+  }
+  const version = connectionVersion;
+  const write = queueWrite.then(async () => {
+    if (version !== connectionVersion) return;
+    const tracks = listedTracks ?? await spotifyQueueTracks(target);
+    if (!tracks.length) throw new Error("There are no playable tracks to queue.");
+    if (version !== connectionVersion) return;
+    const output = spotify.active || await targetDevice();
+    const added = [];
+    try {
+      for (const track of tracks) {
+        if (version !== connectionVersion) return;
+        await spotify.request("/me/player/queue" + deviceQuery(output) + "&uri=" + encodeURIComponent(track.id), "POST");
+        added.push(track);
+      }
+    } catch (error) {
+      if (version !== connectionVersion) return;
+      if (!added.length) throw error;
+      notice("Added " + added.length + " tracks to the queue. " + error.message);
+      return;
+    } finally {
+      if (version === connectionVersion && added.length) {
+        queue.push(...remember(added));
+        render(false, true);
+      }
+    }
+    announce("Added " + target.title + " to queue");
+  });
+  queueWrite = write.catch(() => {});
+  return write;
+}
+function editQueue(action, entry) {
+  if (spotify.connected) return;
+  if (action === "queue-clear") {
+    queue = [];
+    order = [];
+  } else {
+    const delimiter = entry.indexOf(":");
+    if (delimiter < 1) return;
+    const index = Number(entry.slice(0, delimiter));
+    const track = queue[index];
+    if (!track || track.id !== entry.slice(delimiter + 1)) return;
+    if (action === "queue-play") {
+      queue.splice(0, index + 1);
+      return demoSource(track);
+    }
+    if (action === "queue-remove") queue.splice(index, 1);
+    else {
+      const neighbor = index + (action === "queue-up" ? -1 : 1);
+      if (!queue[neighbor]) return;
+      [queue[index], queue[neighbor]] = [queue[neighbor], queue[index]];
+    }
+  }
   render(false, true);
-  announce("Added " + item.title + " to queue");
 }
 async function syncQueue() {
   if (!spotify.connected) return;
@@ -669,6 +754,13 @@ async function dispatch(action, data) {
     case "previous": return nextTrack(true);
     case "like": return like(data);
     case "enqueue": return enqueue(data);
+    case "artist-play": return artistAction(data, true);
+    case "artist-enqueue": return artistAction(data, false);
+    case "queue-play":
+    case "queue-up":
+    case "queue-down":
+    case "queue-remove":
+    case "queue-clear": return editQueue(action, data);
     case "devices": return navigate("devices");
     case "transfer": return transfer(data);
     case "seek": {
