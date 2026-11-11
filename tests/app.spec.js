@@ -123,8 +123,14 @@ test.describe("mocked Spotify integration", () => {
           disconnect(){} activateElement(){return Promise.resolve();}
         }}; window.onSpotifyWebPlaybackSDKReady();`,
       }));
-      await page.addInitScript(raw => {
+      await page.addInitScript(({ raw, largeLibrary }) => {
         const fetchReal = window.fetch.bind(window);
+        const saved = [{ track: raw }];
+        if (largeLibrary) {
+          for (let index = 1; index <= 76; index++) {
+            saved.push({ track: { ...raw, uri: "spotify:track:library" + index, name: "Library song " + index } });
+          }
+        }
         window.spotifyRequests = [];
         window.fetch = async (input, options = {}) => {
           const url = new URL(input, location.href);
@@ -134,11 +140,11 @@ test.describe("mocked Spotify integration", () => {
             authorization: new Headers(options.headers).get("authorization"),
             body: options.body ? JSON.parse(options.body) : null,
           });
-          if (url.pathname === "/v1/me/tracks") return Response.json({ items: [{ track: raw }] });
+          if (url.pathname === "/v1/me/tracks") return Response.json({ items: saved });
           if (url.pathname === "/v1/me/playlists") return Response.json({ items: [] });
           return new Response(null, { status: 204 });
         };
-      }, raw);
+      }, { raw, largeLibrary: mode === "shared" });
       await boot(page);
       if (mode === "shared") {
         const connect = button(page, "Connect Spotify");
@@ -162,6 +168,14 @@ test.describe("mocked Spotify integration", () => {
       await expect.poll(() => request("/v1/me/library")).toMatchObject({
         method: "DELETE", params: { uris: "spotify:track:test" },
       });
+      if (mode === "shared") {
+        await press(page, "Your library");
+        await expect(button(page, "Play Library song 1")).toBeAttached();
+        await expect(button(page, "Play Library song 76")).toHaveCount(0);
+        await page.mouse.move(1150, 450);
+        await page.mouse.wheel(0, 5200);
+        await expect(button(page, "Play Library song 76")).toBeAttached();
+      }
       await press(page, "Account");
       await button(page, "Sign out").click();
       await expect(button(page, "Play mix")).toBeAttached();

@@ -1,8 +1,8 @@
 use crate::effects;
 
 use ferroui_base::{
-    CornerRadius, FerroObjectImpl, Ref, RelativePoint, RelativeUnit, Thickness, WeakRef,
-    ferro_class, ferro_impl_classes,
+    BoxedValue, CornerRadius, FerroObjectImpl, Ref, RelativePoint, RelativeUnit, Thickness,
+    WeakRef, ferro_class, ferro_impl_classes,
     input::InputElement,
     instantiate,
     layout::{HorizontalAlignment as H, Orientation, VerticalAlignment as V},
@@ -17,15 +17,17 @@ use ferroui_base::{
 use ferroui_browser::{BrowserAccessibilityMode, BrowserAppBuilder, BrowserPlatformOptions};
 use ferroui_controls::{
     AppBuilder, Application, ApplicationImpl, ApplicationImplExt, Border, Button,
-    ColumnDefinitions, Control, Grid, Image, NewApplication, RowDefinitions, ScrollViewer, Slider,
-    StackPanel, TextBlock, TextBox, ToolTip,
+    ColumnDefinitions, Control, Grid, Image, ItemsSource, NewApplication, RowDefinitions,
+    ScrollViewer, Slider, StackPanel, TextBlock, TextBox, ToolTip,
     automation::AutomationProperties,
     media::{
         ApplicationTheme, RevealBackgroundBrush, RevealBorderBrush, RevealBrush, RevealBrushState,
     },
     primitives::ScrollBarVisibility,
     shapes::Path,
+    templates::FuncDataTemplate,
 };
+use ferroui_controls_repeater::{ItemsRepeater, StackLayout};
 #[cfg(not(target_os = "emscripten"))]
 use ferroui_desktop::AppBuilderDesktopExtensions as _;
 use ferroui_fonts_inter::AppBuilderExtension;
@@ -105,6 +107,12 @@ struct Ui {
     main: Option<Ref<ScrollViewer>>,
     nav: Vec<(&'static str, Ref<TextBlock>)>,
     footer: Option<Ref<Border>>,
+    chrome: Option<Ref<Border>>,
+    transport: Option<Ref<Border>>,
+    fire: Option<Rc<effects::TransportFire>>,
+    account_label: Option<Ref<TextBlock>>,
+    artist_filter: Option<String>,
+    now_stage: Option<WeakRef<Grid>>,
     search: Option<Ref<TextBox>>,
     seek: Option<Ref<Slider>>,
     elapsed: Option<Ref<TextBlock>>,
@@ -217,6 +225,7 @@ fn color(s: &str) -> Color {
             MUTED | DIM => "#635A63",
             PANEL => "#F2EEF1",
             EDGE => "#DED7DE",
+            BG => "#FCFAFC",
             _ => s,
         }
     } else {
@@ -482,23 +491,46 @@ fn build() {
     root.set_clip_to_bounds(true);
 
     let main = scroll();
-    put(&root, 0, 0, top_bar(mobile, &model));
+    main.size_changed(|_, event| {
+        if event.height_changed() {
+            let height = event.new_size().height;
+            use ferroui_base::threading::{Dispatcher, DispatcherPriority};
+            Dispatcher::ui_thread().post_local(
+                move || {
+                    let stage =
+                        UI.with(|ui| ui.borrow().now_stage.as_ref().and_then(WeakRef::upgrade));
+                    if let Some(stage) = stage {
+                        stage.set_height(height.max(340.0));
+                    }
+                },
+                DispatcherPriority::NORMAL,
+            );
+        }
+    });
+    let chrome = surface(BG, 0.0, 0.0);
+    chrome.set_child(top_bar(mobile, &model));
+    put(&root, 0, 0, chrome.clone().upcast());
     put(&root, 0, 1, main.clone().upcast());
     let footer = surface(BG, 0.0, 0.0);
-    let backdrop = surface(BG, 0.0, 0.0);
+    let backdrop = surface("#01000000", 0.0, 0.0);
     backdrop.set_is_hit_test_visible(false);
-    backdrop.set_max_width(920.0);
-    effects::light(&backdrop, true);
-    let transport = grid("", "");
-    put(&transport, 0, 0, backdrop.upcast());
-    put(&transport, 0, 0, footer.clone().upcast());
+    backdrop.set_vertical_alignment(V::Bottom);
+    backdrop.set_height(49.0);
+    let transport = surface(BG, 0.0, 0.0);
+    let layers = grid("", "");
+    put(&layers, 0, 0, backdrop.clone().upcast());
+    put(&layers, 0, 0, footer.clone().upcast());
     footer.set_background(None);
-    put(&root, 0, 2, transport.upcast());
+    transport.set_child(layers);
+    put(&root, 0, 2, transport.clone().upcast());
 
     UI.with(|s| {
         let mut s = s.borrow_mut();
+        s.fire = Some(effects::TransportFire::new(&backdrop, s.reduced));
         s.main = Some(main);
         s.footer = Some(footer);
+        s.chrome = Some(chrome);
+        s.transport = Some(transport);
     });
     host.set_child(root);
     refresh(true, true, true);
@@ -575,6 +607,7 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
     } else {
         put(&g, 1, 0, search.clone().upcast());
     }
+    UI.with(|ui| ui.borrow_mut().account_label = None);
     let tools = row(5.0);
     center(&tools);
     if !mobile {
@@ -590,10 +623,9 @@ fn top_bar(mobile: bool, model: &Model) -> Ref<Control> {
         } else {
             "Connect Spotify"
         };
-        button(name, strong(name, 12.0, TEXT).upcast(), false, || {
-            send("settings", "")
-        })
-        .upcast::<Control>()
+        let label = strong(name, 12.0, TEXT);
+        UI.with(|ui| ui.borrow_mut().account_label = Some(label.clone()));
+        button(name, label.upcast(), false, || send("settings", "")).upcast::<Control>()
     });
     put(&g, if mobile { 1 } else { 2 }, 0, tools.upcast());
     put(&top, 1, 0, g.upcast());
@@ -646,7 +678,7 @@ fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     wash.set_max_width(1100.0);
     wash.set_vertical_alignment(V::Top);
     wash.set_is_hit_test_visible(false);
-    effects::light(&wash, false);
+    effects::light(&wash);
     put(&scene, 0, 0, wash.upcast());
 
     let content = stack(if mobile { 22.0 } else { 44.0 });
@@ -784,39 +816,80 @@ fn tile_rows(items: &[Item], columns: usize, size: f64) -> Ref<Control> {
     rows.upcast()
 }
 
+fn virtual_list<T: PartialEq + 'static>(
+    items: impl IntoIterator<Item = T>,
+    spacing: f64,
+    build: impl Fn(&T) -> Ref<Control> + 'static,
+) -> Ref<Control> {
+    let light = LIGHT_PAGE.get();
+    let repeater = ItemsRepeater::new();
+    let layout = StackLayout::new();
+    layout.set_spacing(spacing);
+    repeater.set_layout(Some(layout.upcast()));
+    let template = FuncDataTemplate::for_type::<T>(
+        move |item, _| {
+            let previous = LIGHT_PAGE.replace(light);
+            let control = build(item);
+            LIGHT_PAGE.set(previous);
+            Some(control)
+        },
+        false,
+    );
+    repeater.set_data_template(Some(template));
+    repeater.set_items_source(Some(ItemsSource::from_items(
+        items
+            .into_iter()
+            .map(|item| Some(Rc::new(item) as BoxedValue)),
+    )));
+    repeater.upcast()
+}
+
+fn track_list<'a>(items: impl IntoIterator<Item = &'a Item>, compact: bool) -> Ref<Control> {
+    virtual_list(
+        items.into_iter().cloned().enumerate(),
+        2.0,
+        move |(index, item)| track(item, *index, compact),
+    )
+}
+
 fn collection_cards(items: &[Item], cols: usize) -> Ref<Control> {
-    let rows = stack(8.0);
-    for chunk in items.chunks(cols) {
-        let g = grid(&vec!["*"; cols].join(","), "");
-        for (idx, item) in chunk.iter().enumerate() {
-            let card = surface("Transparent", 0.0, 0.0);
-            card.set_margin(Thickness::new(
-                if idx == 0 { 0.0 } else { 4.0 },
-                0.0,
-                if idx + 1 == cols { 0.0 } else { 4.0 },
-                0.0,
-            ));
-            let light = surface("Transparent", 0.0, 0.0);
-            reveal(&light);
-            let p = stack(5.0);
-            let image = cover(&item.art, if cols > 2 { 155.0 } else { 115.0 }, 0.0);
-            p.children().add(image.upcast::<Control>());
-            p.children()
-                .add(strong(&item.title, 13.0, TEXT).upcast::<Control>());
-            p.children()
-                .add(label(&item.artist, 10.5, MUTED).upcast::<Control>());
-            let id = item.id.clone();
-            let b = button(&item.title, p.upcast(), false, move || send("open", &id));
-            b.set_horizontal_alignment(H::Stretch);
-            b.set_horizontal_content_alignment(H::Stretch);
-            b.set_padding(Thickness::uniform(8.0));
-            light.set_child(b);
-            card.set_child(light);
-            put(&g, idx as i32, 0, card.upcast());
-        }
-        rows.children().add(g.upcast::<Control>());
-    }
-    rows.upcast()
+    virtual_list(
+        items.chunks(cols).map(<[Item]>::to_vec),
+        8.0,
+        move |chunk| {
+            let g = grid(&vec!["*"; cols].join(","), "");
+            for (idx, item) in chunk.iter().enumerate() {
+                let card = surface("Transparent", 0.0, 0.0);
+                card.set_margin(Thickness::new(
+                    if idx == 0 { 0.0 } else { 4.0 },
+                    0.0,
+                    if idx + 1 == cols { 0.0 } else { 4.0 },
+                    0.0,
+                ));
+                let light = surface("Transparent", 0.0, 0.0);
+                reveal(&light);
+                let p = stack(5.0);
+                let size = if cols > 2 { 104.0 } else { 112.0 };
+                let image = cover(&item.art, size, 0.0);
+                image.set_width(size);
+                image.set_horizontal_alignment(H::Left);
+                p.children().add(image.upcast::<Control>());
+                p.children()
+                    .add(strong(&item.title, 13.0, TEXT).upcast::<Control>());
+                p.children()
+                    .add(label(&item.artist, 10.5, MUTED).upcast::<Control>());
+                let id = item.id.clone();
+                let b = button(&item.title, p.upcast(), false, move || send("open", &id));
+                b.set_horizontal_alignment(H::Stretch);
+                b.set_horizontal_content_alignment(H::Stretch);
+                b.set_padding(Thickness::uniform(8.0));
+                light.set_child(b);
+                card.set_child(light);
+                put(&g, idx as i32, 0, card.upcast());
+            }
+            g.upcast()
+        },
+    )
 }
 fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
     let light = surface("Transparent", 0.0, 0.0);
@@ -1076,16 +1149,12 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     if !cards.is_empty() {
         page.children().add(collection_cards(&cards, cols));
     }
-    let list = stack(2.0);
-    for (idx, item) in m
-        .items
-        .iter()
-        .filter(|i| i.kind.is_empty() || i.kind == "track")
-        .enumerate()
-    {
-        list.children().add(track(item, idx, false));
-    }
-    page.children().add(list.upcast::<Control>());
+    page.children().add(track_list(
+        m.items
+            .iter()
+            .filter(|item| item.kind.is_empty() || item.kind == "track"),
+        false,
+    ));
     let frame = surface(
         if LIGHT_PAGE.get() {
             "#FCFAFC"
@@ -1131,9 +1200,31 @@ fn collection(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     }
     page.children().add(filters.upcast::<Control>());
     let catalog = grid(
-        if compact { "" } else { "3*,2*" },
+        if compact { "" } else { "1.05*,2.1*,1.8*" },
         if compact { "Auto,Auto" } else { "" },
     );
+    let tracks = m.items.iter().filter(|item| item.kind == "track");
+    let selected = UI.with(|ui| ui.borrow().artist_filter.clone());
+    if !compact {
+        let artists = stack(10.0);
+        artists
+            .children()
+            .add(kicker("ARTISTS", TEXT).upcast::<Control>());
+        let names = tracks
+            .clone()
+            .filter(|item| !item.artist.is_empty())
+            .map(|item| item.artist.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        let all = artist_button("All artists", None, selected.is_none());
+        artists.children().add(all.upcast::<Control>());
+        artists
+            .children()
+            .add(virtual_list(names, 1.0, move |name| {
+                artist_button(name, Some(name.clone()), selected.as_ref() == Some(name)).upcast()
+            }));
+        put(&catalog, 0, 0, artists.upcast());
+    }
+
     let albums = stack(12.0);
     albums
         .children()
@@ -1143,29 +1234,37 @@ fn collection(m: &Model, width: f64, animate: bool) -> Ref<Control> {
             .children()
             .add(label("Your playlists appear here.", 13.0, MUTED).upcast::<Control>());
     } else {
-        albums.children().add(collection_cards(
-            &m.collections,
-            if width >= 1050.0 { 3 } else { 2 },
-        ));
+        let cols = if width >= 1360.0 {
+            4
+        } else if width >= 1050.0 {
+            3
+        } else {
+            2
+        };
+        albums
+            .children()
+            .add(collection_cards(&m.collections, cols));
     }
-    put(&catalog, 0, 0, albums.upcast());
+    put(&catalog, if compact { 0 } else { 1 }, 0, albums.upcast());
 
     let songs = stack(5.0);
     songs.set_margin(if compact {
         Thickness::new(0.0, 18.0, 0.0, 0.0)
     } else {
-        Thickness::new(28.0, 0.0, 0.0, 0.0)
+        Thickness::new(26.0, 0.0, 0.0, 0.0)
     });
     songs
         .children()
         .add(kicker("SONGS", TEXT).upcast::<Control>());
-    let tracks = m.items.iter().filter(|item| item.kind == "track");
-    for (index, item) in tracks.enumerate() {
-        songs.children().add(track(item, index, false));
-    }
+    let filter = UI.with(|ui| ui.borrow().artist_filter.clone());
+    songs.children().add(track_list(
+        tracks
+            .filter(|item| compact || filter.as_ref().is_none_or(|artist| item.artist == *artist)),
+        false,
+    ));
     put(
         &catalog,
-        if compact { 0 } else { 1 },
+        if compact { 0 } else { 2 },
         if compact { 1 } else { 0 },
         songs.upcast(),
     );
@@ -1173,67 +1272,73 @@ fn collection(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     page.upcast()
 }
 
+fn artist_button(name: &str, artist: Option<String>, selected: bool) -> Ref<Button> {
+    let text = label(name, 13.0, if selected { "#BA1267" } else { TEXT });
+    let button = button(name, text.upcast(), false, move || {
+        UI.with(|ui| ui.borrow_mut().artist_filter = artist.clone());
+        refresh(true, false, false);
+    });
+    button.set_horizontal_content_alignment(H::Left);
+    button.set_horizontal_alignment(H::Stretch);
+    button.set_padding(Thickness::new(0.0, 5.0, 5.0, 5.0));
+    button
+}
+
 fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     let mobile = width < 790.0;
-    let p = stack(11.0);
-    p.set_margin(Thickness::uniform(14.0));
-    let heading = grid("*,Auto", "");
-    put(&heading, 0, 0, strong("Now playing", 15.0, TEXT).upcast());
-    let live = kicker(if m.playing { "PLAYING" } else { "READY" }, ACCENT);
-    center(&live);
-    put(&heading, 1, 0, live.upcast());
-    p.children().add(heading.upcast::<Control>());
-    let art_size = if mobile { 190.0 } else { 270.0 };
     let stage = grid("", "");
-    let wash = surface(BG, 0.0, 0.0);
-    wash.set_is_hit_test_visible(false);
-    wash.set_max_width(850.0);
-    effects::light(&wash, false);
-    put(&stage, 0, 0, wash.upcast());
-    let art = row(5.0);
-    art.set_horizontal_alignment(H::Center);
-    art.set_margin(Thickness::uniform(12.0));
-    if !mobile {
-        art.children().add(tile_rows(
-            &m.recent
-                .iter()
-                .filter(|item| item.art != m.current.art)
-                .take(4)
-                .cloned()
-                .collect::<Vec<_>>(),
-            2,
-            78.0,
-        ));
+    stage.set_clip_to_bounds(true);
+    if mobile {
+        stage.set_height(370.0);
+    } else {
+        let viewport = UI.with(|ui| {
+            ui.borrow()
+                .main
+                .as_ref()
+                .map_or(480.0, |main| main.bounds().height)
+        });
+        stage.set_height(viewport.max(340.0));
+        UI.with(|ui| ui.borrow_mut().now_stage = Some(stage.downgrade()));
     }
-    let a = cover(&m.current.art, art_size, 0.0);
-    a.set_width(art_size);
-    a.set_effect(Some(Rc::new(ImmutableDropShadowEffect::new(
-        0.0,
-        5.0,
-        16.0,
-        color("#000000"),
-        0.64,
-    ))));
-    art.children().add(a.upcast::<Control>());
-    if !mobile {
-        art.children().add(tile_rows(
-            &m.queue
-                .iter()
-                .filter(|item| item.art != m.current.art)
-                .take(4)
-                .cloned()
-                .collect::<Vec<_>>(),
-            2,
-            78.0,
-        ));
+    stage.set_background(Some(brush(BG)));
+
+    let mut seen = std::collections::HashSet::new();
+    let covers: Vec<_> = m
+        .collections
+        .iter()
+        .chain(&m.queue)
+        .chain(&m.recent)
+        .chain(std::iter::once(&m.current))
+        .filter(|item| !item.art.is_empty() && seen.insert(item.art.as_str()))
+        .take(20)
+        .collect();
+    if !covers.is_empty() {
+        let columns = if mobile { 4 } else { 8 };
+        let wall = grid(&vec!["*"; columns].join(","), "*,*,*");
+        wall.set_is_hit_test_visible(false);
+        let cell_height = if mobile { 124.0 } else { 160.0 };
+        for row in 0..3 {
+            for column in 0..columns {
+                let item = covers[(row * 3 + column) % covers.len()];
+                let art = cover(&item.art, cell_height, 0.0);
+                art.set_height(f64::NAN);
+                art.set_margin(Thickness::uniform(1.0));
+                put(&wall, column as i32, row as i32, art.upcast());
+            }
+        }
+        put(&stage, 0, 0, wall.upcast());
+        let tint = surface(BG, 0.0, 0.0);
+        let brush = LinearGradientBrush::new();
+        brush.set_end_point(RelativePoint::new(1.0, 0.35, RelativeUnit::Relative));
+        for (ink, offset) in [("#BD341D16", 0.0), ("#C8150E18", 0.56), ("#CB39152D", 1.0)] {
+            brush
+                .gradient_stops()
+                .add(GradientStop::with_color_and_offset(color(ink), offset));
+        }
+        tint.set_background(Some(brush.into()));
+        tint.set_is_hit_test_visible(false);
+        put(&stage, 0, 0, tint.upcast());
     }
-    let frame = surface("Transparent", 0.0, 0.0);
-    frame.set_child(art);
-    if animate {
-        effects::entrance(&frame, 36.0, 0);
-    }
-    put(&stage, 0, 0, frame.upcast());
-    p.children().add(stage.upcast::<Control>());
     let identity = grid("*,Auto,Auto", "");
     let names = stack(3.0);
     names.children().add(
@@ -1243,14 +1348,19 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
             } else {
                 &m.current.title
             },
-            18.0,
+            if mobile { 20.0 } else { 32.0 },
             TEXT,
         )
         .upcast::<Control>(),
     );
     names
         .children()
-        .add(label(&m.current.artist, 12.0, MUTED).upcast::<Control>());
+        .add(label(&m.current.artist, 16.0, TEXT).upcast::<Control>());
+    if !m.current.album.is_empty() {
+        names
+            .children()
+            .add(label(&m.current.album, 12.0, MUTED).upcast::<Control>());
+    }
     put(&identity, 0, 0, names.upcast());
     if !m.current.id.is_empty() {
         put(
@@ -1282,11 +1392,43 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
             .upcast(),
         );
     }
-    p.children().add(identity.upcast::<Control>());
-    let line = surface(EDGE, 0.0, 0.0);
-    line.set_height(1.0);
-    line.set_margin(Thickness::new(0.0, 4.0, 0.0, 4.0));
-    p.children().add(line.upcast::<Control>());
+    let art_size = if mobile { 96.0 } else { 158.0 };
+    let card = cover(&m.current.art, art_size, 0.0);
+    card.set_width(art_size);
+    card.set_border_thickness(Thickness::uniform(2.0));
+    card.set_border_brush(Some(brush(TEXT)));
+    card.set_effect(Some(Rc::new(ImmutableDropShadowEffect::new(
+        0.0,
+        5.0,
+        16.0,
+        color("#000000"),
+        0.65,
+    ))));
+    let focus = grid("Auto,*", "");
+    put(&focus, 0, 0, card.upcast());
+    center(&identity);
+    identity.set_margin(Thickness::new(13.0, 0.0, 0.0, 0.0));
+    put(&focus, 1, 0, identity.upcast());
+    let frame = surface("Transparent", 0.0, 0.0);
+    frame.set_child(focus);
+    frame.set_horizontal_alignment(H::Left);
+    frame.set_vertical_alignment(V::Bottom);
+    frame.set_max_width(if mobile {
+        width - 28.0
+    } else {
+        (width * 0.61).min(790.0)
+    });
+    frame.set_margin(Thickness::new(
+        if mobile { 14.0 } else { 55.0 },
+        0.0,
+        14.0,
+        if mobile { 26.0 } else { 72.0 },
+    ));
+    if animate {
+        effects::entrance(&frame, 32.0, 0);
+    }
+    put(&stage, 0, 0, frame.upcast());
+    let p = stack(10.0);
     let q = grid("*,Auto", "");
     put(&q, 0, 0, strong("Up next", 15.0, TEXT).upcast());
     if !m.queue.is_empty() {
@@ -1302,10 +1444,25 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         p.children()
             .add(label("Your queue is empty.", 12.0, DIM).upcast::<Control>());
     }
-    for (idx, item) in m.queue.iter().enumerate() {
-        p.children().add(track(item, idx, true));
+    p.children().add(track_list(&m.queue, true));
+    let page = stack(0.0);
+    page.children().add(stage.clone().upcast::<Control>());
+    let queue = surface(if mobile { BG } else { "#D51B121D" }, 13.0, 0.0);
+    if mobile {
+        queue.set_child(p);
+        page.children().add(queue.upcast::<Control>());
+    } else {
+        let list = scroll();
+        list.set_content(Some(Rc::new(p.upcast::<Control>())));
+        queue.set_child(list);
+        queue.set_width((width * 0.27).clamp(255.0, 356.0));
+        queue.set_max_height(316.0);
+        queue.set_horizontal_alignment(H::Right);
+        queue.set_vertical_alignment(V::Center);
+        queue.set_margin(Thickness::new(0.0, 12.0, 26.0, 12.0));
+        put(&stage, 0, 0, queue.upcast());
     }
-    p.upcast()
+    page.upcast()
 }
 fn time(s: f64) -> String {
     let s = s.max(0.0) as u64;
@@ -1493,35 +1650,66 @@ fn refresh(body: bool, playback: bool, animate: bool) {
     if !body && !playback {
         return;
     }
-    let (m, width, main, footer, nav, reduced) = UI.with(|ui| {
-        let ui = ui.borrow();
-        (
-            ui.model.clone(),
-            ui.width,
-            ui.main.clone(),
-            ui.footer.clone(),
-            ui.nav.clone(),
-            ui.reduced,
-        )
-    });
+    let (m, width, main, footer, nav, reduced, chrome, transport, fire, search, account) =
+        UI.with(|ui| {
+            let ui = ui.borrow();
+            (
+                ui.model.clone(),
+                ui.width,
+                ui.main.clone(),
+                ui.footer.clone(),
+                ui.nav.clone(),
+                ui.reduced,
+                ui.chrome.clone(),
+                ui.transport.clone(),
+                ui.fire.clone(),
+                ui.search.clone(),
+                ui.account_label.clone(),
+            )
+        });
+    let collection = is_collection(&m.page);
     if body {
-        let collection = m.page == "library" || m.page == "liked" || m.page == "detail";
+        LIGHT_PAGE.set(collection);
+        for shell in [chrome, transport].into_iter().flatten() {
+            shell.set_background(Some(brush(BG)));
+        }
+        if let Some(search) = search {
+            search.set_foreground(Some(brush(TEXT)));
+            search.set_placeholder_foreground(Some(brush(MUTED)));
+            search.set_background(Some(brush(if collection { "#F4EFF3" } else { "#211923" })));
+        }
+        if let Some(account) = account {
+            account.set_foreground(Some(brush(TEXT)));
+        }
         for (route, text) in nav {
             let selected = m.page == route || (route == "library" && collection);
             text.set_foreground(Some(brush(if selected { TEXT } else { MUTED })));
         }
         if let Some(main) = main {
-            LIGHT_PAGE.set(collection);
+            UI.with(|ui| ui.borrow_mut().now_stage = None);
             let view = main_page(&m, width, animate && !reduced);
-            LIGHT_PAGE.set(false);
-            main.set_background(Some(brush(if collection { "#FCFAFC" } else { BG })));
+            main.set_background(Some(brush(BG)));
             main.set_content(Some(Rc::new(view)));
         }
+        LIGHT_PAGE.set(false);
     }
-    if playback && let Some(footer) = footer {
-        footer.set_child(player(&m, width));
+    if playback {
+        if let Some(footer) = footer {
+            LIGHT_PAGE.set(collection);
+            footer.set_child(player(&m, width));
+            LIGHT_PAGE.set(false);
+        }
+        if let Some(fire) = fire {
+            fire.set_track(&m.current.id);
+            fire.set_playing(m.playing);
+        }
     }
 }
+
+fn is_collection(page: &str) -> bool {
+    matches!(page, "library" | "liked" | "detail")
+}
+
 #[cfg(target_os = "emscripten")]
 #[wasm_bindgen(js_name = runMain)]
 pub fn run_main(json: &str, width: f64, reduced: bool) {
@@ -1578,12 +1766,13 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
                     }
                     _ => true,
                 });
-        let playback = playback
-            && (previous.current != model.current
-                || previous.playing != model.playing
-                || previous.shuffle != model.shuffle
-                || previous.repeat != model.repeat
-                || previous.volume != model.volume);
+        let playback = is_collection(&previous.page) != is_collection(&model.page)
+            || (playback
+                && (previous.current != model.current
+                    || previous.playing != model.playing
+                    || previous.shuffle != model.shuffle
+                    || previous.repeat != model.repeat
+                    || previous.volume != model.volume));
         ui.model = model;
         (connected_changed, body, playback)
     });
@@ -1607,7 +1796,7 @@ pub fn resize(width: f64) {
         ui.width = width;
         old
     });
-    if [600.0, 790.0, 920.0, 980.0, 1050.0]
+    if [600.0, 790.0, 920.0, 980.0, 1050.0, 1360.0]
         .iter()
         .any(|b| (old < *b) != (width < *b))
     {
@@ -1616,10 +1805,13 @@ pub fn resize(width: f64) {
 }
 #[cfg_attr(target_os = "emscripten", wasm_bindgen)]
 pub fn tick(position: f64) {
-    let (bar, t) = UI.with(|ui| {
+    let (bar, t, fire) = UI.with(|ui| {
         let ui = ui.borrow();
-        (ui.seek.clone(), ui.elapsed.clone())
+        (ui.seek.clone(), ui.elapsed.clone(), ui.fire.clone())
     });
+    if let Some(fire) = fire {
+        fire.set_position(position);
+    }
     TICKING.set(true);
     if let Some(bar) = bar {
         bar.set_range_value(position);

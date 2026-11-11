@@ -1,6 +1,6 @@
 """Generate the bundled, original ambient loops; no third-party recordings."""
 from array import array
-from math import exp, pi, sin, tanh
+from math import cos, exp, pi, sin, sqrt, tanh
 from pathlib import Path
 import random
 import sys
@@ -8,6 +8,53 @@ import wave
 
 out = Path(__file__).resolve().parents[1] / "wwwroot" / "audio"
 out.mkdir(exist_ok=True)
+
+
+def visualizer_spectrum():
+    window_size = 1024
+    window = [(0.5 - 0.5 * cos(2 * pi * index / (window_size - 1))) / 32768
+              for index in range(window_size)]
+    bits = window_size.bit_length() - 1
+    order = [int(f"{index:0{bits}b}"[::-1], 2) for index in range(window_size)]
+    roots = [complex(cos(-2 * pi * index / window_size), sin(-2 * pi * index / window_size))
+             for index in range(window_size // 2)]
+    spectrum = bytearray()
+    for index in range(1, 7):
+        with wave.open(str(out / f"sample-{index}.wav"), "rb") as source:
+            rate = source.getframerate()
+            samples = array("h", [0] * (window_size // 2))
+            samples.frombytes(source.readframes(source.getnframes()))
+            if sys.byteorder != "little":
+                samples.byteswap()
+        samples.extend([0] * (540 * (rate // 20) + window_size - len(samples)))
+        bands = [(31, 180, 11), (180, 1800, 18), (1800, 7600, 55)]
+        for frame in range(540):
+            start = frame * (rate // 20)
+            bins = [samples[start + offset] * window[offset] for offset in order]
+            step = 2
+            while step <= window_size:
+                half = step // 2
+                for base in range(0, window_size, step):
+                    for offset in range(half):
+                        a = base + offset
+                        b = a + half
+                        rotated = bins[b] * roots[offset * (window_size // step)]
+                        bins[a], bins[b] = bins[a] + rotated, bins[a] - rotated
+                step *= 2
+            for low, high, gain in bands:
+                first = (low * window_size + rate - 1) // rate
+                end = (high * window_size + rate - 1) // rate
+                power = sum(abs(value) ** 2 for value in bins[first:end])
+                magnitude = sqrt(power) * 4 / window_size
+                spectrum.append(round((1 - exp(-magnitude * gain)) * 255))
+    output = out.parents[1] / "src" / "shaders" / "demo-spectrum.bin"
+    output.write_bytes(spectrum)
+
+
+if "--spectrum-only" in sys.argv:
+    visualizer_spectrum()
+    sys.exit()
+
 rate = 16000
 for index, (root, beat, seconds) in enumerate([(48, .62, 24), (45, .71, 26), (52, .49, 22),
                                                (43, .81, 27), (50, .57, 25), (46, .66, 24)]):
@@ -38,3 +85,5 @@ for index, (root, beat, seconds) in enumerate([(48, .62, 24), (45, .71, 26), (52
     with wave.open(str(out / f"sample-{index+1}.wav"), "wb") as output:
         output.setparams((1, 2, rate, 0, "NONE", "not compressed"))
         output.writeframes(audio.tobytes())
+
+visualizer_spectrum()

@@ -677,6 +677,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ferroui-controls-repeater"
+version = "0.5.0-preview.1"
+dependencies = [
+ "bitflags 2.13.2",
+ "ferroui-base",
+ "ferroui-build-scan",
+ "ferroui-controls",
+ "rustc-hash",
+]
+
+[[package]]
 name = "ferroui-desktop"
 version = "0.5.0-preview.1"
 dependencies = [
@@ -2047,6 +2058,7 @@ dependencies = [
  "ferroui-base",
  "ferroui-browser",
  "ferroui-controls",
+ "ferroui-controls-repeater",
  "ferroui-desktop",
  "ferroui-fonts-inter",
  "ferroui-themes-winui",

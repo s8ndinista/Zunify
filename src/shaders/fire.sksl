@@ -1,0 +1,26 @@
+uniform float2 layer_size;
+uniform float layer_scale;
+uniform float phase;
+uniform float bass;
+uniform float midrange;
+uniform float treble;
+
+half4 main(float2 coord) {
+    float2 uv = coord / max(layer_size, float2(1.0));
+    float x = uv.x;
+    float height = 1.0 - uv.y;
+    float center = 1.0 - smoothstep(0.0, 0.54, abs(x - 0.5));
+    float t = phase;
+    float wave = 0.58 + (0.11 + 0.16 * midrange) * sin(43.0*x - 2.8*t)
+                      + (0.04 + 0.15 * midrange) * sin(92.0*x + 4.1*t)
+                      + (0.015 + 0.18 * treble) * sin(153.0*x - 5.5*t);
+    float crest = 0.048 + center * (0.08 + 0.63 * wave) * (0.20 + 0.73 * bass);
+    float flame = 1.0 - smoothstep(0.0, crest, height);
+    float haze = (1.0 - smoothstep(0.0, crest + 0.24, height)) * center;
+    float edge = 0.15 + center * 0.85;
+    float level = clamp(bass * 0.74 + midrange * 0.34 + treble * 0.18, 0.0, 1.0);
+    float alpha = edge * (flame * (0.25 + 0.52 * level) + haze * 0.25) * smoothstep(0.0, 0.23, level);
+    float heat = (1.0 - smoothstep(0.0, crest * 0.80, height)) * (0.24 + 0.76 * center);
+    float3 tint = mix(float3(0.97, 0.035, 0.42), float3(1.0, 0.31, 0.09), heat);
+    return half4(tint * alpha, alpha);
+}

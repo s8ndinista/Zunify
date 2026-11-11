@@ -7,6 +7,7 @@ license = "MIT"
 [dependencies]
 ferroui-base = { path = "vendor/FerroUI/src/FerroUI.Base" }
 ferroui-controls = { path = "vendor/FerroUI/src/FerroUI.Controls" }
+ferroui-controls-repeater = { path = "vendor/FerroUI/src/FerroUI.Controls.Repeater" }
 ferroui-themes-winui = { path = "vendor/FerroUI/src/FerroUI.Themes.WinUI" }
 ferroui-fonts-inter = { path = "vendor/FerroUI/src/FerroUI.Fonts.Inter" }
 serde = { version = "1", features = ["derive"] }
