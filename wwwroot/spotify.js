@@ -124,7 +124,9 @@ export class Spotify {
 
   async page(path, limit = 100, key) {
     const rows = [];
-    for (let next = path; next && rows.length < limit;) {
+    const visited = new Set();
+    for (let next = path; next && rows.length < limit && !visited.has(next);) {
+      visited.add(next);
       const data = await this.request(next);
       const result = key ? data?.[key] : data;
       rows.push(...(result?.items ?? []));

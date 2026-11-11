@@ -11,7 +11,7 @@ use ferroui_base::{
     instantiate,
     layout::{HorizontalAlignment as H, Orientation, VerticalAlignment as V},
     media::{
-        Color, FontManagerOptions, FontWeight, Geometry, GradientStop, IBrush, LinearGradientBrush,
+        Color, FontManagerOptions, FontWeight, Geometry, GradientStop, IBrush, LinearGradientBrush, ScaleTransform,
         Stretch, TextTrimming, TextWrapping, effects::ImmutableDropShadowEffect, imaging::Bitmap,
         immutable::ImmutableSolidColorBrush,
     },
@@ -23,7 +23,7 @@ use ferroui_browser::{BrowserAccessibilityMode, BrowserAppBuilder, BrowserPlatfo
 use ferroui_controls::chrome::WindowDecorationProperties;
 use ferroui_controls::{
     AppBuilder, Application, ApplicationImpl, ApplicationImplExt, Border, Button,
-    ColumnDefinitions, ContentControl, Control, Grid, Image, ItemsSource, NewApplication,
+    ColumnDefinitions, ContentControl, ContextMenu, Control, Grid, Image, ItemsSource, MenuItem, NewApplication,
     RepeatButton, RowDefinitions, ScrollViewer, Slider, StackPanel, TextBlock, TextBox, ToolTip,
     automation::AutomationProperties,
     media::{
@@ -411,6 +411,9 @@ fn icon(name: &str, ink: &str, size: f64) -> Ref<Grid> {
         ),
         "pin" => ("M6 3 H16 M8 3 V9 L5 13 H17 L14 9 V3 M11 13 V21", false),
         "plus" => ("M11 3 V19 M3 11 H19", false),
+        "up" => ("M5 14 L11 8 L17 14", false),
+        "down" => ("M5 8 L11 14 L17 8", false),
+        "remove" => ("M5 5 L17 17 M17 5 L5 17", false),
         "arrow" => ("M3 11 H19 M13 5 L19 11 L13 17", false),
         "external" => ("M12 3 H20 V11 M20 3 L9 14 M8 5 H3 V20 H18 V15", false),
         "music" => (
@@ -495,6 +498,83 @@ fn action(name: &str, glyph: &str, ink: &str, code: &'static str, arg: &str) -> 
     b.set_width(35.0);
     b.set_height(34.0);
     b
+}
+fn reveal_actions(host: &Ref<Border>, controls: &[Ref<Control>]) {
+    if UI.with(|ui| ui.borrow().width < 790.0) {
+        return;
+    }
+    for control in controls {
+        control.set_opacity(0.0);
+    }
+    let controls = controls.iter().map(Ref::downgrade).collect::<Vec<_>>();
+    let host_ref = host.downgrade();
+    host.add_property_changed_handler(Rc::new(move |change| {
+        let property = change.property();
+        if property != InputElement::is_pointer_over_property().as_property()
+            && property != InputElement::is_keyboard_focus_within_property().as_property()
+        {
+            return;
+        }
+        let Some(host) = host_ref.upgrade() else { return };
+        let opacity = if host.is_pointer_over() || host.is_keyboard_focus_within() {
+            1.0
+        } else {
+            0.0
+        };
+        for control in controls.iter().filter_map(WeakRef::upgrade) {
+            control.set_opacity(opacity);
+        }
+    }));
+}
+
+fn collection_actions(item: &Item) -> Option<Ref<Border>> {
+    if !matches!(item.kind.as_str(), "album" | "artist" | "playlist") {
+        return None;
+    }
+    let buttons = row(2.0);
+    let play = action(
+        &format!("Play {}", item.title), "play", "#F8F4F7", "play", &item.id,
+    );
+    play.set_width(30.0);
+    play.set_height(30.0);
+    ToolTip::set_tip(&play, Some(Rc::new("Play".to_owned())));
+    buttons.children().add(play.upcast::<Control>());
+    if queueable_collection(item) {
+        let add = action(
+            &format!("Add {} to queue", item.title), "plus", "#F8F4F7", "enqueue", &item.id,
+        );
+        add.set_width(30.0);
+        add.set_height(30.0);
+        ToolTip::set_tip(&add, Some(Rc::new("Add to queue".to_owned())));
+        buttons.children().add(add.upcast::<Control>());
+    }
+    let overlay = surface("#E01C1220", 0.0, 0.0);
+    overlay.set_child(buttons);
+    overlay.set_horizontal_alignment(H::Left);
+    overlay.set_vertical_alignment(V::Top);
+    Some(overlay)
+}
+
+fn playback_menu(
+    host: &Control,
+    play: (&'static str, &str),
+    enqueue: Option<(&'static str, &str)>,
+) {
+    let menu = ContextMenu::new();
+    for (label, action, arg) in std::iter::once(("Play", play.0, play.1))
+        .chain(enqueue.map(|(action, arg)| ("Add to now playing", action, arg)))
+    {
+        let item = MenuItem::new();
+        item.set_header(Some(Rc::new(label.to_owned())));
+        let arg = arg.to_owned();
+        item.click(move |_, _| send(action, &arg));
+        menu.items().add(Some(Control::boxed(item)));
+    }
+    host.set_context_menu(Some(menu));
+}
+
+fn queueable_collection(item: &Item) -> bool {
+    matches!(item.kind.as_str(), "album" | "artist") || item.id.starts_with("mix:")
 }
 fn pill(name: &str, glyph: &str, primary: bool, code: &'static str, arg: &str) -> Ref<Button> {
     let ink = if primary { "#220E19" } else { TEXT };
@@ -969,7 +1049,7 @@ fn header(title: &str, detail: &str) -> Ref<Control> {
     put(&g, 1, 0, t.upcast());
     g.upcast()
 }
-fn artwork_tile(item: &Item, size: f64, play: bool) -> Ref<Button> {
+fn artwork_tile(item: &Item, size: f64, play: bool) -> Ref<Control> {
     let art = cover(&item.art, size, 0.0);
     art.set_width(size);
     let id = item.id.clone();
@@ -985,7 +1065,20 @@ fn artwork_tile(item: &Item, size: f64, play: bool) -> Ref<Button> {
     tile.set_width(size);
     tile.set_height(size);
     ToolTip::set_tip(&tile, Some(Rc::new(item.title.clone())));
-    tile
+    if let Some(actions) = collection_actions(item) {
+        let layers = grid("", "");
+        put(&layers, 0, 0, tile.upcast());
+        actions.set_vertical_alignment(V::Bottom);
+        put(&layers, 0, 0, actions.clone().upcast());
+        let host = surface("Transparent", 0.0, 0.0);
+        host.set_child(layers);
+        let enqueue = queueable_collection(item).then_some(("enqueue", item.id.as_str()));
+        playback_menu(&host, ("play", &item.id), enqueue);
+        reveal_actions(&host, &[actions.upcast()]);
+        host.upcast()
+    } else {
+        tile.upcast()
+    }
 }
 
 fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
@@ -1039,7 +1132,7 @@ fn quickplay(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         let mosaic = row(5.0);
         mosaic
             .children()
-            .add(artwork_tile(featured, tiles * 1.35, false).upcast::<Control>());
+            .add(artwork_tile(featured, tiles * 1.35, false));
         mosaic.children().add(tile_rows(
             &m.collections[1..m.collections.len().min(5)],
             2,
@@ -1134,7 +1227,7 @@ fn tile_rows(items: &[Item], columns: usize, size: f64) -> Ref<Control> {
         let line = row(5.0);
         for item in chunk {
             line.children()
-                .add(artwork_tile(item, size, item.kind == "track").upcast::<Control>());
+                .add(artwork_tile(item, size, item.kind == "track"));
         }
         rows.children().add(line.upcast::<Control>());
     }
@@ -1227,17 +1320,34 @@ fn collection_card_row(chunk: &[Item], cols: usize) -> Ref<Control> {
         b.set_horizontal_alignment(H::Stretch);
         b.set_horizontal_content_alignment(H::Stretch);
         b.set_padding(Thickness::uniform(8.0));
-        light.set_child(b);
+        if let Some(actions) = collection_actions(item) {
+            let layers = grid("", "");
+            put(&layers, 0, 0, b.upcast());
+            actions.set_margin(Thickness::new(8.0, size - 22.0, 0.0, 0.0));
+            put(&layers, 0, 0, actions.clone().upcast());
+            light.set_child(layers);
+            let enqueue = queueable_collection(item).then_some(("enqueue", item.id.as_str()));
+            playback_menu(&light, ("play", &item.id), enqueue);
+            reveal_actions(&light, &[actions.upcast()]);
+        } else {
+            light.set_child(b);
+        }
         card.set_child(light);
         put(&g, idx as i32, 0, card.upcast());
     }
     g.upcast()
 }
 fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
+    track_row(item, index, compact, None)
+}
+
+fn track_row(item: &Item, index: usize, compact: bool, editable_queue: Option<usize>) -> Ref<Control> {
     let light = surface("Transparent", 0.0, 0.0);
     reveal(&light);
     let g = grid(
-        if compact {
+        if editable_queue.is_some() {
+            "*,35,29,29,29"
+        } else if compact {
             "*,35"
         } else if item.id.starts_with("spotify:") {
             "*,35,35,35,42"
@@ -1255,7 +1365,13 @@ fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
     }
     let image = cover(&item.art, if compact { 30.0 } else { 35.0 }, 5.0);
     image.set_width(if compact { 30.0 } else { 35.0 });
-    put(&r, col, 0, image.upcast());
+    let artwork = grid("", "");
+    put(&artwork, 0, 0, image.upcast());
+    let play_glyph = surface("#B5161018", 0.0, 0.0);
+    play_glyph.set_child(icon("play", "#F8F4F7", 14.0));
+    play_glyph.set_is_hit_test_visible(false);
+    put(&artwork, 0, 0, play_glyph.clone().upcast());
+    put(&r, col, 0, artwork.upcast());
     let names = stack(1.0);
     center(&names);
     names.set_margin(Thickness::new(7.0, 0.0, 0.0, 0.0));
@@ -1266,21 +1382,42 @@ fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
         .children()
         .add(label(&item.artist, 10.5, MUTED).upcast::<Control>());
     put(&r, col + 1, 0, names.upcast());
-    let id = item.id.clone();
+    let queue_entry = format!("{index}:{}", item.id);
+    let (code, arg) = if editable_queue.is_some() {
+        ("queue-play", queue_entry.clone())
+    } else {
+        ("play", item.id.clone())
+    };
+    playback_menu(&light, (code, &arg), (!compact).then_some(("enqueue", item.id.as_str())));
     let b = button(
         &format!("Play {}", item.title),
         r.upcast(),
         false,
-        move || send("play", &id),
+        move || send(code, &arg),
     );
     b.set_horizontal_alignment(H::Stretch);
     b.set_horizontal_content_alignment(H::Stretch);
     b.set_padding(Thickness::new(6.0, 4.0, 4.0, 4.0));
     put(&g, 0, 0, b.upcast());
+    let mut hover = vec![play_glyph.upcast::<Control>()];
     if compact {
         let t = label(&time(item.duration), 10.0, DIM);
         center(&t);
         put(&g, 1, 0, t.upcast());
+        if let Some(count) = editable_queue {
+            for (column, name, glyph, code, enabled) in [
+                (2, format!("Move {} up in queue", item.title), "up", "queue-up", index > 0),
+                (3, format!("Move {} down in queue", item.title), "down", "queue-down", index + 1 < count),
+                (4, format!("Remove {} from queue", item.title), "remove", "queue-remove", true),
+            ] {
+                let button = action(&name, glyph, MUTED, code, &queue_entry);
+                button.set_width(29.0);
+                button.set_is_enabled(enabled);
+                ToolTip::set_tip(&button, Some(Rc::new(name)));
+                hover.push(button.clone().upcast());
+                put(&g, column, 0, button.upcast());
+            }
+        }
     } else {
         put(
             &g,
@@ -1299,12 +1436,10 @@ fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
             )
             .upcast(),
         );
-        put(
-            &g,
-            2,
-            0,
-            action("Add to queue", "plus", MUTED, "enqueue", &item.id).upcast(),
-        );
+        let add = action("Add to queue", "plus", MUTED, "enqueue", &item.id);
+        ToolTip::set_tip(&add, Some(Rc::new("Add to queue".to_owned())));
+        hover.push(add.clone().upcast());
+        put(&g, 2, 0, add.upcast());
         let t = label(&time(item.duration), 11.0, DIM);
         center(&t);
         t.set_horizontal_alignment(H::Center);
@@ -1329,6 +1464,7 @@ fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
         put(&g, col, 0, t.upcast());
     }
     light.set_child(g);
+    reveal_actions(&light, &hover);
     light.upcast()
 }
 fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
@@ -1448,6 +1584,13 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
                 actions
                     .children()
                     .add(pill("Play all", "play", true, "play", "").upcast::<Control>());
+                if ["spotify:album:", "spotify:artist:", "mix:"]
+                    .iter().any(|prefix| m.detail.starts_with(prefix))
+                {
+                    actions.children().add(
+                        pill("Add to queue", "plus", false, "enqueue", &m.detail).upcast::<Control>(),
+                    );
+                }
             }
             if m.detail.starts_with("spotify:") {
                 actions.children().add(
@@ -1548,7 +1691,6 @@ impl<T: Clone + PartialEq + 'static> CollectionPane<T> {
 
 struct CollectionView {
     root: Ref<Grid>,
-    #[cfg(not(target_os = "emscripten"))]
     status: Ref<TextBlock>,
     artists: CollectionPane<Option<String>>,
     playlists: CollectionPane<Vec<Item>>,
@@ -1570,11 +1712,7 @@ impl CollectionView {
         } else {
             2
         };
-        let root = grid("", if cfg!(target_os = "emscripten") {
-            "Auto,Auto,Auto,*"
-        } else {
-            "Auto,Auto,Auto,Auto,*"
-        });
+        let root = grid("", "Auto,Auto,Auto,Auto,*");
         let inset = if compact { 16.0 } else { 44.0 };
         root.set_margin(Thickness::new(inset, 16.0, inset, 16.0));
         root.set_max_width(1370.0);
@@ -1659,19 +1797,14 @@ impl CollectionView {
             tab_row.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
             put(&root, 0, 2, tab_row.upcast());
         }
-        #[cfg(not(target_os = "emscripten"))]
-        let status = {
-            let text = label("", 13.0, "#BA1267");
-            text.set_text_wrapping(TextWrapping::Wrap);
-            text.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
-            put(&root, 0, 3, text.clone().upcast());
-            text
-        };
-        put(&root, 0, if cfg!(target_os = "emscripten") { 3 } else { 4 }, catalog.upcast());
+        let status = label("", 13.0, "#BA1267");
+        status.set_text_wrapping(TextWrapping::Wrap);
+        status.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
+        put(&root, 0, 3, status.clone().upcast());
+        put(&root, 0, 4, catalog.upcast());
 
         let view = Self {
             root,
-            #[cfg(not(target_os = "emscripten"))]
             status,
             artists,
             playlists,
@@ -1699,11 +1832,8 @@ impl CollectionView {
     }
 
     fn update(&self, m: &Model) {
-        #[cfg(not(target_os = "emscripten"))]
-        {
-            self.status.set_text(Some(&m.status));
-            self.status.set_is_visible(!m.status.is_empty());
-        }
+        self.status.set_text(Some(&m.status));
+        self.status.set_is_visible(!m.status.is_empty());
         let selected = UI.with(|ui| ui.borrow().artist_filter.clone());
         let tracks = m.items.iter().filter(|item| item.kind == "track");
         let names = tracks
@@ -1794,7 +1924,24 @@ fn artist_button(artist: &Option<String>) -> Ref<Control> {
     button.set_horizontal_content_alignment(H::Left);
     button.set_horizontal_alignment(H::Stretch);
     button.set_padding(Thickness::new(0.0, 5.0, 5.0, 5.0));
-    button.upcast()
+    let Some(artist) = artist.as_deref() else { return button.upcast() };
+    let play = action(&format!("Play {artist}"), "play", TEXT, "artist-play", artist);
+    let add = action(&format!("Add {artist} to queue"), "plus", MUTED, "artist-enqueue", artist);
+    let actions = row(0.0);
+    for (control, tip) in [(&play, "Play"), (&add, "Add to queue")] {
+        control.set_width(27.0);
+        control.set_height(26.0);
+        ToolTip::set_tip(control, Some(Rc::new(tip.to_owned())));
+        actions.children().add(control.clone().upcast::<Control>());
+    }
+    let layout = grid("*,Auto", "");
+    put(&layout, 0, 0, button.upcast());
+    put(&layout, 1, 0, actions.clone().upcast());
+    let host = surface("Transparent", 0.0, 0.0);
+    host.set_child(layout);
+    playback_menu(&host, ("artist-play", artist), Some(("artist-enqueue", artist)));
+    reveal_actions(&host, &[actions.upcast()]);
+    host.upcast()
 }
 
 fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
@@ -1944,7 +2091,9 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     let p = stack(10.0);
     let q = grid("*,Auto", "");
     put(&q, 0, 0, strong("Up next", 15.0, TEXT).upcast());
-    if !m.queue.is_empty() {
+    if !m.queue.is_empty() && !m.connected {
+        put(&q, 1, 0, pill("Clear queue", "remove", false, "queue-clear", "").upcast());
+    } else if !m.queue.is_empty() {
         put(
             &q,
             1,
@@ -1957,7 +2106,12 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         p.children()
             .add(label("Your queue is empty.", 12.0, DIM).upcast::<Control>());
     }
-    p.children().add(track_list(&m.queue, true));
+    let editable = (!m.connected).then_some(m.queue.len());
+    p.children().add(virtual_list(
+        m.queue.iter().cloned().enumerate(),
+        2.0,
+        move |(index, item)| track_row(item, *index, true, editable),
+    ));
     let page = stack(0.0);
     page.children().add(stage.clone().upcast::<Control>());
     let queue = surface(if mobile { BG } else { "#D51B121D" }, 13.0, 0.0);
@@ -1998,7 +2152,7 @@ fn slider(name: &str, max: f64, value: f64, code: &'static str) -> Ref<Slider> {
     });
     s
 }
-fn player(m: &Model, width: f64) -> Ref<Control> {
+fn player(m: &Model, width: f64, fire: Option<&effects::TransportFire>) -> Ref<Control> {
     let compact = width < 920.0;
     let g = grid(
         if compact { "*,Auto" } else { "*,*,*,Auto" },
@@ -2046,11 +2200,17 @@ fn player(m: &Model, width: f64) -> Ref<Control> {
     center(&playing);
 
     let size = if compact { 33.0 } else { 42.0 };
-    let art = cover(&m.current.art, size, 0.0);
-    art.set_width(size);
-    center(&art);
+    let art = cover(&m.current.art, size - 2.0, 0.0);
+    let frame = surface("Transparent", 0.0, 0.0);
+    frame.set_child(art);
+    frame.set_width(size);
+    frame.set_height(size);
+    frame.set_border_brush(Some(brush(MUTED)));
+    frame.set_border_thickness(Thickness::uniform(1.0));
+    frame.set_horizontal_alignment(H::Left);
+    center(&frame);
     let identity = grid(if compact { "38,*" } else { "49,*" }, "");
-    put(&identity, 0, 0, art.upcast());
+    put(&identity, 0, 0, frame.upcast());
     if compact {
         put(&identity, 1, 0, playing.upcast());
         put(&g, 0, 0, identity.upcast());
@@ -2156,6 +2316,25 @@ fn player(m: &Model, width: f64) -> Ref<Control> {
         center(&volume);
         buttons.children().add(volume.upcast::<Control>());
     }
+    let meter = row(2.0);
+    meter.set_margin(Thickness::new(5.0, 0.0, 0.0, 0.0));
+    meter.set_is_hit_test_visible(false);
+    center(&meter);
+    let bars = std::array::from_fn(|index| {
+        let bar = surface(ACCENT, 0.0, 0.0);
+        bar.set_width(3.0);
+        bar.set_height(13.0);
+        bar.set_render_transform_origin(RelativePoint::new(0.5, 1.0, RelativeUnit::Relative));
+        let scale = ScaleTransform::new();
+        scale.set_scale_y([0.26, 0.62, 1.0, 0.42][index]);
+        bar.set_render_transform(Some(scale.clone().into()));
+        meter.children().add(bar.upcast::<Control>());
+        scale
+    });
+    if let Some(fire) = fire {
+        fire.set_meter(bars);
+    }
+    buttons.children().add(meter.upcast::<Control>());
     put(&g, if compact { 1 } else { 3 }, 0, buttons.upcast());
     g.upcast()
 }
@@ -2234,7 +2413,7 @@ fn refresh(body: bool, playback: bool, animate: bool) {
     if playback {
         if let Some(footer) = footer {
             LIGHT_PAGE.set(collection);
-            footer.set_child(player(&m, width));
+            footer.set_child(player(&m, width, fire.as_deref()));
             LIGHT_PAGE.set(false);
         }
         if let Some(fire) = fire {

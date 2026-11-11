@@ -290,6 +290,10 @@ impl Session {
     }
 
     pub fn items(&mut self, path: &str, field: Option<&str>) -> Result<Vec<Value>> {
+        self.items_up_to(path, field, 100)
+    }
+
+    pub fn items_up_to(&mut self, path: &str, field: Option<&str>, limit: usize) -> Result<Vec<Value>> {
         let mut next = Some(path.to_owned());
         let mut items = Vec::new();
         for _ in 0..10 {
@@ -297,9 +301,9 @@ impl Session {
             let data = self.get(&path)?;
             let page = field.map_or(&data, |field| &data[field]);
             if let Some(rows) = page["items"].as_array() {
-                items.extend(rows.iter().take(100 - items.len()).cloned());
+                items.extend(rows.iter().take(limit - items.len()).cloned());
             }
-            if items.len() >= 100 {
+            if items.len() >= limit {
                 break;
             }
             next = page["next"]

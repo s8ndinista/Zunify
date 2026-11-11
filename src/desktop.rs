@@ -66,6 +66,7 @@ enum Update {
     View(Vec<Item>, String),
     Playback(Value),
     Queue(Vec<Item>),
+    Enqueued(Vec<Item>, Option<String>),
     Liked(Item, bool),
     StartedPlayback(String),
     PlaybackNeedsDevice(Value),
@@ -885,6 +886,99 @@ impl Desktop {
         });
     }
 
+    fn enqueue(&mut self, id: &str) {
+        if !self.model.connected {
+            if let Some(mix) = self.demo.mixes.iter().find(|mix| mix.item.id == id) {
+                self.upcoming.extend(mix.tracks.iter().filter_map(|id| self.known.get(id).cloned()));
+            } else if let Some(track) = self.known.get(id).filter(|item| item.kind == "track") {
+                self.upcoming.push_back(track.clone());
+            }
+            self.model.queue = self.upcoming.iter().cloned().collect();
+            self.render(false, true, false);
+            return;
+        }
+        let Some(target) = self.known.get(id).cloned() else { return };
+        let output = self.playback_device().map(str::to_owned);
+        self.api(None, false, false, move |session| {
+            let tracks = match split_uri(&target.id) {
+                Some(("track", _)) => vec![target],
+                Some(("album", id)) => {
+                    let rows = session.items_up_to(&format!("/albums/{id}/tracks?limit=50"), None, usize::MAX)?;
+                    rows.iter()
+                        .filter_map(item)
+                        .filter(|track| track.kind == "track")
+                        .map(|mut track| {
+                            track.art.clone_from(&target.art);
+                            track.album.clone_from(&target.title);
+                            track
+                        })
+                        .collect()
+                }
+                Some(("artist", _)) => catalog_artist_tracks(session, &target)?,
+                _ => return Ok(Update::Enqueued(Vec::new(), None)),
+            };
+            if tracks.is_empty() {
+                return Err("There are no playable tracks to queue.".into());
+            }
+            Ok(enqueue_spotify(session, tracks, output.as_deref()))
+        });
+    }
+
+    fn artist_action(&mut self, artist: &str, play: bool) -> spotify::Result<()> {
+        let tracks: Vec<_> = self.model.items.iter()
+            .filter(|item| item.kind == "track" && item.artist == artist)
+            .cloned()
+            .collect();
+        let Some(first) = tracks.first().cloned() else { return Ok(()) };
+        match (play, self.model.connected) {
+            (true, true) => self.start_playback(playback_payload(&first, &tracks, None), false),
+            (true, false) => {
+                self.upcoming = tracks.iter().skip(1).cloned().collect();
+                self.order = tracks;
+                self.history.clear();
+                self.local_play(first)?;
+            }
+            (false, true) => {
+                let output = self.playback_device().map(str::to_owned);
+                self.api(None, false, false, move |session| {
+                    Ok(enqueue_spotify(session, tracks, output.as_deref()))
+                });
+            }
+            (false, false) => {
+                self.upcoming.extend(tracks);
+                self.model.queue = self.upcoming.iter().cloned().collect();
+                self.render(false, true, false);
+            }
+        }
+        Ok(())
+    }
+
+    fn edit_queue(&mut self, action: &str, entry: &str) -> spotify::Result<()> {
+        if action == "queue-clear" {
+            self.upcoming.clear();
+            self.order.clear();
+        } else {
+            let Some((index, id)) = entry.split_once(':') else { return Ok(()) };
+            let Ok(index) = index.parse::<usize>() else { return Ok(()) };
+            let Some(track) = self.upcoming.get(index).filter(|item| item.id == id) else { return Ok(()) };
+            match action {
+                "queue-play" => {
+                    let track = track.clone();
+                    self.upcoming.drain(..=index);
+                    self.history.push(self.model.current.clone());
+                    return self.local_play(track);
+                }
+                "queue-up" if index > 0 => self.upcoming.swap(index - 1, index),
+                "queue-down" if index + 1 < self.upcoming.len() => self.upcoming.swap(index, index + 1),
+                "queue-remove" => { self.upcoming.remove(index); }
+                _ => return Ok(()),
+            }
+        }
+        self.model.queue = self.upcoming.iter().cloned().collect();
+        self.render(false, true, false);
+        Ok(())
+    }
+
     fn action(&mut self, action: &str, value: &str) -> spotify::Result<()> {
         match action {
             "art" => self.load_art(value),
@@ -947,15 +1041,13 @@ impl Desktop {
             "next" => self.next(false, false)?,
             "previous" => self.next(true, false)?,
             "like" => self.like(value),
-            "enqueue" if self.model.connected => {
-                self.control("queue", Http::Post, &[("uri", value)], None)
-            }
-            "enqueue" => {
-                if let Some(item) = self.known.get(value).cloned() {
-                    self.upcoming.push_back(item);
-                    self.model.queue = self.upcoming.iter().cloned().collect();
-                    self.render(false, true, false);
-                }
+            "enqueue" => self.enqueue(value),
+            "artist-play" => self.artist_action(value, true)?,
+            "artist-enqueue" => self.artist_action(value, false)?,
+            "queue-play" | "queue-up" | "queue-down" | "queue-remove" | "queue-clear"
+                if !self.model.connected =>
+            {
+                self.edit_queue(action, value)?;
             }
             "devices" => self.navigate("devices", ""),
             "transfer" if self.model.connected => {
@@ -1211,6 +1303,21 @@ impl Desktop {
                     self.render(false, true, false);
                 }
             }
+            Update::Enqueued(items, error) => {
+                if !items.is_empty() {
+                    self.remember(&items);
+                    self.model.queue.extend(items.iter().cloned());
+                    self.render(false, true, false);
+                    self.fetch_queue();
+                }
+                if let Some(error) = error {
+                    if items.is_empty() {
+                        self.status(error);
+                    } else {
+                        self.status(format!("Added {} tracks to the queue. {error}", items.len()));
+                    }
+                }
+            }
             Update::Liked(item, add) => self.apply_like(item, add),
             Update::StartedPlayback(id) => {
                 self.active_device = id;
@@ -1341,6 +1448,39 @@ impl Desktop {
     }
 }
 
+fn enqueue_spotify(session: &mut Session, tracks: Vec<Item>, output: Option<&str>) -> Update {
+    let mut added = Vec::new();
+    for track in tracks {
+        let mut params = vec![("uri", track.id.as_str())];
+        if let Some(device) = output {
+            params.push(("device_id", device));
+        }
+        let path = format!("/me/player/queue?{}", query(&params));
+        if let Err(error) = session.request(Http::Post, &path, None) {
+            return Update::Enqueued(added, Some(error));
+        }
+        added.push(track);
+    }
+    Update::Enqueued(added, None)
+}
+
+fn catalog_artist_tracks(session: &mut Session, artist: &Item) -> spotify::Result<Vec<Item>> {
+    let term = format!("artist:\"{}\"", artist.title.replace('"', " "));
+    let response = session.get(&format!(
+        "/search?{}",
+        query(&[("q", &term), ("type", "track"), ("limit", "10")])
+    ))?;
+    Ok(response["tracks"]["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|track| track["artists"].as_array().is_some_and(|artists| {
+            artists.iter().any(|entry| str_field(entry, "uri") == artist.id)
+        }))
+        .filter_map(item)
+        .collect())
+}
+
 fn collection(session: &mut Session, target: Item) -> spotify::Result<Update> {
     let (rows, field) = if target.id == "section:albums" {
         (session.items("/me/albums?limit=50", None)?, Some("album"))
@@ -1361,18 +1501,13 @@ fn collection(session: &mut Session, target: Item) -> spotify::Result<Update> {
                 None,
             ),
             "artist" => {
-                let term = format!("artist:\"{}\"", target.title);
-                let response = session.get(&format!(
-                    "/search?{}",
-                    query(&[("q", &term), ("type", "track"), ("limit", "10")])
-                ))?;
-                (
-                    response["tracks"]["items"]
-                        .as_array()
-                        .cloned()
-                        .unwrap_or_default(),
-                    None,
-                )
+                let tracks = catalog_artist_tracks(session, &target)?;
+                let caption = if tracks.is_empty() {
+                    "No playable tracks found.".into()
+                } else {
+                    format!("Tracks by {}", target.title)
+                };
+                return Ok(Update::View(tracks, caption));
             }
             _ => return Err("This collection is unavailable.".into()),
         }
@@ -1464,7 +1599,7 @@ fn section(id: &str, title: &str, description: &str) -> Item {
 }
 
 fn playback_payload(target: &Item, items: &[Item], context: Option<&str>) -> Value {
-    if matches!(target.kind.as_str(), "album" | "playlist") {
+    if matches!(target.kind.as_str(), "album" | "artist" | "playlist") {
         return json!({ "context_uri": target.id });
     }
     let mut tracks = items.iter().filter(|item| item.kind == "track").peekable();

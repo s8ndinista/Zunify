@@ -45,6 +45,26 @@ test("plays a bundled mix and supports queueing, liking and mobile layout", asyn
   await press(page, "Now playing");
   await expect(page.getByText("Up next", { exact: true })).toBeAttached();
   await expect(button(page, "Play Midnight Signal").first()).toBeAttached();
+  await press(page, "Move Midnight Signal up in queue");
+  await press(page, "Move Midnight Signal up in queue");
+  await press(page, "Next track");
+  await expect.poll(() => page.locator("audio").evaluate(audio => audio.getAttribute("src"))).toMatch(/sample-1/);
+  await press(page, "Remove Blue Hour from queue");
+  await expect(button(page, "Play Blue Hour")).toHaveCount(0);
+  await press(page, "Clear queue");
+  await expect(page.getByText("Your queue is empty.")).toBeAttached();
+  await press(page, "Your library");
+  const artistQueue = button(page, "Add Glass Meridian to queue");
+  await expect(artistQueue).toBeAttached();
+  const artistAction = await artistQueue.boundingBox();
+  await page.mouse.move(artistAction.x + artistAction.width / 2, artistAction.y + artistAction.height / 2);
+  await page.mouse.click(artistAction.x + artistAction.width / 2, artistAction.y + artistAction.height / 2);
+  await expect(page.locator("#announcement")).toHaveText("Added Glass Meridian to queue");
+  await press(page, "Add Deep Focus to queue");
+  await press(page, "Now playing");
+  await expect(button(page, "Play Low Orbit").first()).toBeAttached();
+  await expect(button(page, "Play A Place Between")).toBeAttached();
+  await expect(button(page, "Play Soft Horizons")).toBeAttached();
   await page.setViewportSize({ width: 390, height: 780 });
   await expect(button(page, "Spotify settings")).toBeAttached({ timeout: 15_000 });
   await expect(button(page, "Your library")).toHaveCount(1);
@@ -167,6 +187,20 @@ test.describe("mocked Spotify integration", () => {
           });
           if (url.pathname === "/v1/me/tracks") return Response.json({ items: saved });
           if (url.pathname === "/v1/me/playlists") return Response.json({ items: playlists });
+          if (url.pathname === "/v1/me/albums") return Response.json({ items: [
+            { album: { type: "album", uri: "spotify:album:test", name: "Test Album", artists: raw.artists } },
+          ] });
+          if (url.pathname === "/v1/me/following") return Response.json({ artists: { items: [
+            { type: "artist", uri: "spotify:artist:test", name: "Catalog Artist" },
+          ] } });
+          if (url.pathname === "/v1/search") return Response.json({ tracks: { items: [
+            { ...raw, uri: "spotify:track:unrelated", artists: [{ name: "Catalog Artist", uri: "spotify:artist:other" }] },
+            { ...raw, uri: "spotify:track:byartist", artists: [{ name: "Catalog Artist", uri: "spotify:artist:test" }] },
+          ] } });
+          if (url.pathname === "/v1/albums/test/tracks") return Response.json({ items: [
+            { ...raw, uri: "spotify:track:album1", name: "Album track one" },
+            { ...raw, uri: "spotify:track:album2", name: "Album track two" },
+          ] });
           if (url.pathname === "/v1/me/player/devices") return Response.json({ devices: [
             { id: "horizon", name: "Horizon" }, { id: "web-zunify", name: "Zunify" },
           ] });
@@ -251,6 +285,29 @@ test.describe("mocked Spotify integration", () => {
         await press(page, "Select playback device");
         await expect(button(page, "Zunify")).toHaveCount(1);
         await expect(button(page, "Horizon")).toBeAttached();
+        await press(page, "Your library");
+        await press(page, "Albums");
+        await press(page, "Add Test Album to queue");
+        await expect.poll(() => page.evaluate(() => window.spotifyRequests
+          .filter(r => r.method === "POST" && r.path === "/v1/me/player/queue")
+          .map(r => r.params))).toEqual([
+          { device_id: "web-zunify", uri: "spotify:track:album1" },
+          { device_id: "web-zunify", uri: "spotify:track:album2" },
+        ]);
+        await press(page, "Play Test Album");
+        await expect.poll(() => page.evaluate(() => window.spotifyRequests
+          .find(r => r.body?.context_uri === "spotify:album:test")?.path)).toBe("/v1/me/player/play");
+        await press(page, "Your library");
+        await press(page, "Artists");
+        await press(page, "Add Catalog Artist to queue");
+        await expect.poll(() => page.evaluate(() => window.spotifyRequests
+          .filter(r => r.method === "POST" && r.path === "/v1/me/player/queue")
+          .map(r => r.params.uri))).toEqual([
+          "spotify:track:album1", "spotify:track:album2", "spotify:track:byartist",
+        ]);
+        await press(page, "Play Catalog Artist");
+        await expect.poll(() => page.evaluate(() => window.spotifyRequests
+          .find(r => r.body?.context_uri === "spotify:artist:test")?.path)).toBe("/v1/me/player/play");
       }
       if (mode === "shared") {
         const songs = page.getByRole("region", { name: "SONGS", exact: true });

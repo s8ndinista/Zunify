@@ -6,7 +6,7 @@ use ferroui_base::{
     interactivity::RoutingStrategies,
     layout::{HorizontalAlignment, VerticalAlignment},
     media::{
-        Color, GradientStop, RadialGradientBrush, TranslateTransform,
+        Color, GradientStop, RadialGradientBrush, ScaleTransform, TranslateTransform,
         effects::{
             CustomEffect, EffectParameterValue, ImmutableCustomEffect, ShaderEffectDescription,
         },
@@ -167,6 +167,7 @@ pub(crate) struct TransportFire {
     lit: Cell<bool>,
     last_frame: Cell<f64>,
     levels: RefCell<[f64; spectrum::BANDS]>,
+    meter: RefCell<Option<[Ref<ScaleTransform>; 4]>>,
     // The invented spectrum shown when the app cannot listen.
     targets: RefCell<[f64; spectrum::BANDS]>,
     next_kick: Cell<f64>,
@@ -183,6 +184,7 @@ impl TransportFire {
             lit: Cell::new(false),
             last_frame: Cell::new(f64::NEG_INFINITY),
             levels: RefCell::new([0.0; spectrum::BANDS]),
+            meter: RefCell::new(None),
             targets: RefCell::new([0.0; spectrum::BANDS]),
             next_kick: Cell::new(0.0),
             seed: Cell::new(0x9E37_79B9),
@@ -199,6 +201,22 @@ impl TransportFire {
             self.schedule();
         }
         // When the music stops, the frames keep coming until the flames have died down.
+    }
+
+    pub(crate) fn set_meter(&self, bars: [Ref<ScaleTransform>; 4]) {
+        self.meter.replace(Some(bars));
+        self.paint_meter(&self.levels.borrow());
+    }
+
+    fn paint_meter(&self, levels: &[f64; spectrum::BANDS]) {
+        if let Some(bars) = self.meter.borrow().as_ref() {
+            for ((bar, bands), floor) in bars.iter().zip(levels.chunks_exact(spectrum::BANDS / 4))
+                .zip([0.20, 0.39, 0.54, 0.27])
+            {
+                let peak = bands.iter().copied().fold(0.0, f64::max);
+                bar.set_scale_y(floor + (1.0 - floor) * (peak * 1.4).min(1.0));
+            }
+        }
     }
 
     fn clear(&self) {
@@ -265,6 +283,7 @@ impl TransportFire {
             // Flames leap with the music and fall away more slowly.
             *level += (target - *level) * if target > *level { 0.7 } else { 0.2 };
         }
+        self.paint_meter(&levels);
         if levels.iter().all(|level| *level < 0.004) {
             drop(levels);
             self.clear();
