@@ -298,7 +298,7 @@ fn put(g: &Grid, x: i32, y: i32, c: Ref<Control>) {
 fn center(c: &Control) {
     c.set_vertical_alignment(V::Center);
 }
-fn icon(name: &str, ink: &str, size: f64) -> Ref<Path> {
+fn icon(name: &str, ink: &str, size: f64) -> Ref<Grid> {
     let (path, fill) = match name {
         "play" => ("M4 2 L19 11 L4 20 Z", true),
         "pause" => ("M4 2 L8 2 L8 20 L4 20 Z M14 2 L18 2 L18 20 L14 20 Z", true),
@@ -334,19 +334,32 @@ fn icon(name: &str, ink: &str, size: f64) -> Ref<Path> {
         "logo" => ("M2 13 L5 9 L8 15 L11 4 L14 18 L17 8 L20 12", false),
         _ => ("M3 11 H19", false),
     };
+    let slot = grid("", "");
+    slot.set_width(size);
+    slot.set_height(size);
+    center(&slot);
+    let Ok(geometry) = Geometry::parse(path) else {
+        return slot;
+    };
+    let bounds = geometry.bounds();
+    let scale = size / bounds.width.max(bounds.height);
+    // Uniform stretch positions the path at the top left of its layout bounds.
+    // Fit the path to its own aspect ratio, then center it in the square slot.
     let p = Path::new();
-    p.set_data(Geometry::parse(path).ok());
-    p.set_width(size);
-    p.set_height(size);
+    p.set_data(Some(geometry));
+    p.set_width(bounds.width * scale);
+    p.set_height(bounds.height * scale);
     p.set_stretch(Stretch::Uniform);
-    p.set_vertical_alignment(V::Center);
+    p.set_horizontal_alignment(H::Center);
+    center(&p);
     if fill {
         p.set_fill(Some(brush(ink)));
     } else {
         p.set_stroke(Some(brush(ink)));
         p.set_stroke_thickness(1.65);
     }
-    p
+    put(&slot, 0, 0, p.upcast());
+    slot
 }
 fn button(name: &str, content: Ref<Control>, primary: bool, f: impl Fn() + 'static) -> Ref<Button> {
     let b = Button::new();
@@ -372,18 +385,29 @@ fn button(name: &str, content: Ref<Control>, primary: bool, f: impl Fn() + 'stat
     }
     b.set_border_thickness(Thickness::uniform(0.0));
     b.set_horizontal_content_alignment(H::Center);
+    b.set_vertical_content_alignment(V::Center);
     AutomationProperties::set_name(&b, Some(name));
     b.click(move |_, _| f());
     b
 }
+fn icon_button(
+    name: &str,
+    glyph: &str,
+    ink: &str,
+    size: f64,
+    f: impl Fn() + 'static,
+) -> Ref<Button> {
+    let b = button(name, icon(glyph, ink, size).upcast(), false, f);
+    b.set_horizontal_alignment(H::Center);
+    center(&b);
+    b.set_padding(Thickness::uniform(0.0));
+    b
+}
 fn action(name: &str, glyph: &str, ink: &str, code: &'static str, arg: &str) -> Ref<Button> {
     let arg = arg.to_owned();
-    let b = button(name, icon(glyph, ink, 16.0).upcast(), false, move || {
-        send(code, &arg)
-    });
+    let b = icon_button(name, glyph, ink, 16.0, move || send(code, &arg));
     b.set_width(35.0);
     b.set_height(34.0);
-    b.set_padding(Thickness::uniform(0.0));
     b
 }
 fn pill(name: &str, glyph: &str, primary: bool, code: &'static str, arg: &str) -> Ref<Button> {
@@ -922,7 +946,7 @@ fn track(item: &Item, index: usize, compact: bool) -> Ref<Control> {
         if compact {
             "*,35"
         } else if item.id.starts_with("spotify:") {
-            "*,32,32,32,42"
+            "*,35,35,35,42"
         } else {
             "*,35,35,48"
         },
@@ -1802,10 +1826,11 @@ fn player(m: &Model, width: f64) -> Ref<Control> {
     buttons
         .children()
         .add(action("Previous track", "prev", TEXT, "previous", "").upcast::<Control>());
-    let toggle = button(
+    let toggle = icon_button(
         if m.playing { "Pause" } else { "Play" },
-        icon(if m.playing { "pause" } else { "play" }, TEXT, 14.0).upcast(),
-        false,
+        if m.playing { "pause" } else { "play" },
+        TEXT,
+        14.0,
         || send("toggle", ""),
     );
     toggle.set_width(36.0);
@@ -1813,7 +1838,6 @@ fn player(m: &Model, width: f64) -> Ref<Control> {
     toggle.set_corner_radius(CornerRadius::uniform(18.0));
     toggle.set_border_brush(Some(brush(MUTED)));
     toggle.set_border_thickness(Thickness::uniform(1.5));
-    toggle.set_padding(Thickness::uniform(0.0));
     buttons.children().add(toggle.upcast::<Control>());
     buttons
         .children()
