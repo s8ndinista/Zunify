@@ -1,16 +1,23 @@
 import { FerroExports } from "./ferroui.js";
 import { loadModule } from "./ferroui-loader.js";
-import { mixes, tracks } from "./demo.js";
 import { PLAYER_NAME, Spotify, itemOf } from "./spotify.js";
 import { AudioPath } from "./audio.js";
 import { spotifyClientId } from "./spotify-config.js";
-import { droppedMusicFiles, findCover, pickMusicFiles, readMusicFiles } from "./local-media.js";
+import { droppedMusicFiles, findCover, pickMusicFiles, readMusicFiles, readMusicFolders } from "./local-media.js";
+
+import { loadFolder, saveFolder } from "./local-folder-store.js";
 
 const spotify = new Spotify();
 const audio = document.querySelector("audio");
 const sound = new AudioPath(audio);
 const settings = document.querySelector("#settings");
 const settingsStatus = document.querySelector("#settings-status");
+const playlistDialog = document.querySelector("#local-playlist");
+const playlistForm = playlistDialog.querySelector("form");
+const playlistSelect = playlistForm.querySelector("select");
+const playlistName = playlistForm.querySelector("input");
+const playlistRemove = playlistForm.querySelector("[data-remove]");
+let playlistTarget = "";
 const known = new Map();
 const sections = [
   { id: "section:liked", title: "Liked songs", artist: "Saved tracks", kind: "section" },
@@ -28,7 +35,8 @@ let playbackRevision = 0, playbackPoll, playbackRefresh;
 let queueWrite = Promise.resolve();
 let local = { tracks: [], albums: [], files: new Map(), covers: new Map() };
 let localPlayback = false, localUrl, importing = false, importVersion = 0, lastCoverLookup = -Infinity;
-let folderChoice;
+let folderChoice, rememberedFolder, folderNotice = "";
+let localQueue = [];
 let spotifyPause, sourceRevision = 0;
 let historyEntry = { index: 0, page: "home", detail: "", query: "" };
 let backTarget;
@@ -40,18 +48,25 @@ const read = (name, fallback) => {
 const save = (name, value) => {
   try { localStorage.setItem(name, JSON.stringify(value)); } catch { /* optional preferences */ }
 };
+const localLikes = new Set(read("zunify.local.likes", []));
+const playlists = read("zunify.local.playlists", []);
+const savedTracks = () => [...localLikes, ...liked].map(id => known.get(id)).filter(Boolean);
 const remember = xs => xs.filter(Boolean).map(item => (known.set(item.id, item), item));
-const decorated = item => ({ ...item, liked: liked.has(item.id) });
+const decorated = item => ({ ...item, liked: (isLocal(item.id) ? localLikes : liked).has(item.id) });
 const render = (body = true, player = true, reset = false) => {
   if (!runtime) return;
-  runtime.updateModel(JSON.stringify(model()), body || (player && (page === "home" || page === "queue")), player, reset);
+  runtime.updateModel(JSON.stringify(model()), body || (player && (page === "home" || page === "queue" || page === "local-queue")), player, reset);
   if (player) { tick(); pump(); }
 };
 const model = () => ({
   page, title, caption, detail, query, status, connected: spotify.connected, can_go_back: historyEntry.index > 0,
-  collections: page === "local" ? local.albums.map(({ tracks, ...album }) => decorated(album)) : library.map(decorated),
-  items: items.map(decorated), queue: queue.map(decorated),
-  liked_music: page === "home" ? [...liked].map(id => known.get(id)).filter(Boolean).slice(0, 6) : [],
+  collections: page === "local" ? [...playlists.map(list => known.get(list.id)).filter(Boolean), ...local.albums].map(({ tracks, ...album }) => decorated(album)) : library.map(decorated),
+  items: items.map(decorated), queue: (page === "local-queue" || !spotifyPlayback() ? localQueue : queue).map(decorated),
+  collection_art: page === "queue" || page === "local-queue"
+    ? [...new Set([...known.values()].map(item => item.art).filter(Boolean))] : [],
+  folder_name: rememberedFolder?.names.join(", ") ?? "",
+  folder_can_rescan: Boolean(rememberedFolder?.handles?.length), folder_notice: folderNotice,
+  liked_music: page === "home" ? savedTracks().slice(0, 6) : [],
   recent, current: decorated(current), playing, shuffle, repeat, volume,
 });
 const tick = () => {
@@ -78,8 +93,116 @@ const announce = message => { document.querySelector("#announcement").textConten
 const notice = message => { status = message; announce(message); render(true, false); };
 const fail = error => notice(error?.message || "Something went wrong.");
 const releaseLocalUrl = () => { if (localUrl) URL.revokeObjectURL(localUrl); localUrl = undefined; };
-const stopDemo = () => { audio.pause(); audio.removeAttribute("src"); audio.load(); releaseLocalUrl(); };
-const rememberLocal = () => remember([...local.tracks, ...local.albums]);
+const stopLocalAudio = () => { audio.pause(); audio.removeAttribute("src"); audio.load(); releaseLocalUrl(); };
+function rememberLocal() {
+  remember([...local.tracks, ...local.albums]);
+  remember(playlists.map(playlist => ({
+    id: playlist.id, kind: "playlist", title: playlist.name, artist: "Local playlist",
+    art: playlist.ids.map(id => known.get(id)?.art).find(Boolean) || "",
+    tracks: playlist.ids.map(id => known.get(id)).filter(Boolean),
+  })));
+}
+function openPlaylistDialog(target) {
+  playlistTarget = target;
+  const editing = playlists.find(playlist => playlist.id === target);
+  playlistDialog.querySelector("h2").textContent = editing ? "Edit playlist" : target ? "Add to playlist" : "New playlist";
+  playlistSelect.replaceChildren(new Option("New playlist", ""));
+  if (target && !editing) {
+    for (const playlist of playlists) playlistSelect.add(new Option(playlist.name, playlist.id));
+    playlistSelect.value = playlists.find(playlist => playlist.id === detail)?.id ?? playlists[0]?.id ?? "";
+  }
+  playlistSelect.parentElement.hidden = !target || Boolean(editing) || !playlists.length;
+  playlistName.value = editing?.name ?? "";
+  updatePlaylistDialog();
+  playlistDialog.showModal();
+}
+function updatePlaylistDialog() {
+  const editing = playlists.find(playlist => playlist.id === playlistTarget);
+  const selected = playlists.find(playlist => playlist.id === playlistSelect.value);
+  playlistName.required = !selected;
+  playlistName.parentElement.hidden = Boolean(selected);
+  playlistRemove.hidden = !editing && !selected?.ids.includes(playlistTarget);
+  playlistRemove.textContent = editing ? "Delete playlist" : "Remove track";
+}
+playlistSelect.addEventListener("change", updatePlaylistDialog);
+async function finishPlaylistEdit() {
+  save("zunify.local.playlists", playlists);
+  rememberLocal();
+  playlistDialog.close();
+  await navigate(page, detail, false, false);
+}
+playlistForm.addEventListener("submit", async event => {
+  event.preventDefault();
+  if (event.submitter?.value === "cancel") return playlistDialog.close();
+  const name = playlistName.value.trim();
+  let playlist = playlists.find(list => list.id === playlistTarget);
+  if (playlist) {
+    if (!name) return;
+    playlist.name = name;
+  } else {
+    playlist = playlists.find(list => list.id === playlistSelect.value);
+    if (!playlist) {
+      if (!name) return;
+      playlist = { id: "local:playlist:" + crypto.randomUUID(), name, ids: [] };
+      playlists.push(playlist);
+    }
+    if (playlistTarget && !playlist.ids.includes(playlistTarget)) playlist.ids.push(playlistTarget);
+  }
+  await finishPlaylistEdit();
+  announce("Saved playlist " + playlist.name);
+});
+playlistRemove.addEventListener("click", async () => {
+  const index = playlists.findIndex(list => list.id === playlistTarget);
+  if (index >= 0) {
+    if (!confirm("Delete this playlist?")) return;
+    known.delete(playlists[index].id);
+    playlists.splice(index, 1);
+    await navigate("local", "", false, false);
+  } else {
+    const playlist = playlists.find(list => list.id === playlistSelect.value);
+    if (playlist) playlist.ids = playlist.ids.filter(id => id !== playlistTarget);
+  }
+  await finishPlaylistEdit();
+});
+const saveLocalQueue = () => save("zunify.local.queue", localQueue.map(track => track.id));
+async function rescanFolder(prompt = false) {
+  if (folderChoice || importing) return;
+  const folder = rememberedFolder;
+  if (!folder?.handles?.length) return;
+  try {
+    await importFolder(async () => {
+      for (const handle of folder.handles) {
+        const permission = prompt ? await handle.requestPermission({ mode: "read" })
+          : await handle.queryPermission({ mode: "read" });
+        if (permission !== "granted") {
+          folderNotice = "Allow folder access to rescan your music.";
+          render(true, false);
+          return null;
+        }
+      }
+      return readMusicFolders(folder.handles);
+    }, { refreshing: true });
+  } catch {
+    folderNotice = "Could not read the saved folder. Drop it again or choose another folder.";
+    render(true, false);
+  }
+}
+async function restoreFolder() {
+  const folder = await loadFolder().catch(() => null);
+  if (!folder || rememberedFolder || folderChoice || importing) return;
+  rememberedFolder = folder;
+  if (folder.catalog) {
+    Object.assign(local, folder.catalog);
+    rememberLocal();
+    localQueue = read("zunify.local.queue", []).map(id => known.get(id)).filter(Boolean);
+    await navigate(page, detail, true, false);
+  }
+  if (folder.handles?.length) await rescanFolder();
+  else {
+    folderNotice = "Drop your saved folder again to reconnect your music.";
+    render(true, false);
+  }
+}
 async function chooseMusicFolder() {
   if (folderChoice || importing) return;
   const choice = folderChoice = new AbortController();
@@ -93,44 +216,72 @@ async function chooseMusicFolder() {
   }
 }
 
-async function importFolder(chooseFiles) {
+async function importFolder(chooseFiles, { refreshing = false } = {}) {
   if (importing) return;
   importing = true;
   try {
-    const entries = await chooseFiles();
-    if (!entries) return;
-    if (page === "local") notice("Reading music folder…");
-    const result = await readMusicFiles(entries, ++importVersion);
-    if (!result.tracks.length) throw new Error("No MP3, FLAC, WAV, Ogg, M4A or MP4 files were found in this folder or its subfolders.");
-    if (localPlayback) {
-      stopDemo(); localPlayback = false; playing = false; current = {};
+    if (page === "local") notice("Scanning music folder…");
+    const selection = await chooseFiles();
+    if (!selection) return;
+    const result = await readMusicFiles(selection.entries, ++importVersion, rememberedFolder?.metadata);
+    if (!result.tracks.length && !refreshing) {
+      throw new Error("No MP3, FLAC, WAV, Ogg, M4A or MP4 files were found in this folder or its subfolders.");
     }
-    order = order.filter(track => !isLocal(track.id));
-    queue = queue.filter(track => !isLocal(track.id));
-    recent = recent.filter(track => !isLocal(track.id));
-    for (const track of local.tracks) { known.delete(track.id); liked.delete(track.id); }
-    for (const album of local.albums) known.delete(album.id);
+    const { names, handles } = selection;
+    const withoutCover = item => ({ ...item, art: "" });
+    const catalog = {
+      tracks: result.tracks.map(withoutCover),
+      albums: result.albums.map(album => ({ ...withoutCover(album), tracks: album.tracks.map(withoutCover) })),
+    };
+    rememberedFolder = { names, handles, catalog, metadata: result.metadataCache };
+    try { await saveFolder(rememberedFolder); }
+    catch {
+      rememberedFolder = { names, catalog, metadata: result.metadataCache };
+      await saveFolder(rememberedFolder).catch(() => {});
+    }
+    folderNotice = rememberedFolder?.handles?.length ? "" : "Drop this folder again after reloading to reconnect your music.";
+    const queued = read("zunify.local.queue", []);
+    for (const item of [...local.tracks, ...local.albums]) known.delete(item.id);
     local = result;
     rememberLocal();
-    if (page === "local" || isLocal(detail)) await navigate("local");
-    render(false, true);
-  } finally { importing = false; }
+    localQueue = queued.map(id => known.get(id)).filter(Boolean);
+    order = order.map(track => known.get(track.id)).filter(Boolean);
+    recent = recent.map(track => known.get(track.id)).filter(Boolean);
+    if (localPlayback && !local.files.has(current.id)) {
+      stopLocalAudio();
+      localPlayback = false; playing = false; current = {};
+    } else if (localPlayback) {
+      current = known.get(current.id);
+    }
+    status = "";
+    await navigate(isLocal(detail) && !known.has(detail) ? "local" : page, known.has(detail) ? detail : "", false, false);
+    render(true, true);
+  } finally {
+    importing = false;
+    if (status === "Scanning music folder…") { status = ""; render(true, false); }
+  }
 }
 
-const musicDrop = event => runtime && page === "local" && !settings.open
-  && event.dataTransfer?.types.includes("Files");
+const musicDrop = event => runtime && (page === "local" || page === "home") && !settings.open && !playlistDialog.open
+  && Array.from(event.dataTransfer?.types ?? []).includes("Files");
 document.querySelector("#out").addEventListener("dragover", event => {
   if (!musicDrop(event)) return;
   event.preventDefault();
   event.stopPropagation();
   event.dataTransfer.dropEffect = "copy";
+  document.querySelector("#out").classList.add("music-dragging");
+}, true);
+document.querySelector("#out").addEventListener("dragleave", event => {
+  if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.classList.remove("music-dragging");
 }, true);
 document.querySelector("#out").addEventListener("drop", event => {
   if (!musicDrop(event)) return;
   event.preventDefault();
   event.stopPropagation();
+  event.currentTarget.classList.remove("music-dragging");
   folderChoice?.abort();
   folderChoice = undefined;
+  if (page === "home") navigate("local").catch(fail);
   importFolder(() => droppedMusicFiles(event.dataTransfer)).catch(fail);
 }, true);
 
@@ -150,20 +301,15 @@ async function findLocalCover(id) {
   if (nav === requestedPage) status = "";
   render(true, true);
 }
-function demo() {
+function resetPlayback() {
   rememberLocal();
-  remember([...mixes, ...tracks]);
-  library = mixes;
-  recent = [];
-  liked = new Set(read("spotifast.demo.liked", [tracks[0].id, tracks[2].id]));
+  library = []; recent = []; liked = new Set(); order = []; queue = [];
   volume = read("spotifast.volume", 65);
   sound.volume = volume / 100;
-  current = tracks[0];
-  order = tracks;
-  queue = tracks.slice(1);
+  current = {};
   playing = shuffle = repeat = false;
   position = 0;
-  items = tracks;
+  items = [];
 }
 async function loadLibrary() {
   const version = connectionVersion;
@@ -198,38 +344,36 @@ async function navigate(next, id = "", preserveStatus = false, record = true) {
   detail = id;
   const target = known.get(id);
   title = ({ home: "Quickplay", search: "Browse", library: "Collection", local: "Local music", liked: "Liked songs",
-    detail: target?.title || "Collection", devices: "Playback devices", queue: "Queue" })[next];
+    detail: target?.title || "Collection", devices: "Playback devices", queue: "Queue", "local-queue": "Local queue" })[next];
   caption = "";
   if (!preserveStatus) status = "";
   const set = (data, text = "") => {
     if (request !== nav) return;
     items = data; caption = text; render(true, false);
   };
-  const saved = () => [...liked].map(id => known.get(id)).filter(Boolean);
-  items = next === "home" ? (spotify.connected ? saved().slice(0, 12) : tracks) :
+  items = next === "home" ? savedTracks().slice(0, 12) :
     next === "local" ? local.tracks :
-    next === "library" ? [...remember(sections), ...(spotify.connected ? saved() : tracks)] :
-    next === "liked" ? saved() : next === "search" && !query && !spotify.connected ? mixes : [];
+    next === "library" ? [...remember(sections), ...savedTracks()] :
+    next === "liked" ? savedTracks() : [];
   if (next === "search") caption = query ? "Looking for music…" : "Search for a song, album, artist, or playlist.";
   if (next === "detail") caption = target?.artist || "";
   if (next === "devices") caption = spotify.connected
     ? "Play here or send music to another Spotify Connect device."
-    : "Demo audio plays on this device. Connect Spotify to see your Spotify Connect devices.";
+    : "Local music plays on this device. Connect Spotify to see your Spotify Connect devices.";
   if (next === "liked" && !items.length) caption = "Songs you save appear here.";
   if (next === "library" && !items.length) caption = "Your Spotify playlists appear here.";
-  if (next === "local" && !items.length) status = "Choose a music folder or drag the folder itself here from your file manager.";
-  render(true, next === "queue", true);
+  render(true, (next === "queue" || next === "local-queue"), true);
   try {
     if (next === "search" && query) {
-      if (!spotify.connected) {
-        const terms = query.toLowerCase().split(/\s+/);
-        const found = [...tracks, ...mixes].filter(t => terms.every(q => (t.title + " " + t.artist + " " + (t.album || "")).toLowerCase().includes(q)));
-        set(found, found.length ? "Results in the demo library" : "No results in the demo library.");
-      } else {
+      const terms = query.toLowerCase().split(/\s+/);
+      const found = [...local.tracks, ...local.albums, ...playlists.map(list => known.get(list.id))]
+        .filter(t => terms.every(q => (t.title + " " + t.artist + " " + (t.album || "")).toLowerCase().includes(q)));
+      set(found, found.length ? "Local music" : "No results found.");
+      if (spotify.connected) {
         const result = await spotify.request("/search?" + new URLSearchParams({ q: query, type: "track,album,artist,playlist", limit: "10" }));
         if (request !== nav) return;
-        const found = remember(["tracks", "albums", "artists", "playlists"].flatMap(type => (result?.[type]?.items || []).map(x => itemOf(x))));
-        set(found, found.length ? "Spotify search results" : "No results found.");
+        const remote = remember(["tracks", "albums", "artists", "playlists"].flatMap(type => (result?.[type]?.items || []).map(x => itemOf(x))));
+        set([...found, ...remote], found.length || remote.length ? "Local music and Spotify" : "No results found.");
       }
     } else if (next === "detail" && target) {
       if (isLocal(id)) {
@@ -289,7 +433,7 @@ addEventListener("popstate", event => {
 });
 
 async function getDevices() {
-  if (!spotify.connected) { deviceRows = [{ id: "demo", title: "This device" }]; return; }
+  if (!spotify.connected) { deviceRows = [{ id: "local-device", title: "This device" }]; return; }
   deviceRows = [{ id: "browser", title: PLAYER_NAME }];
   try {
     const data = await spotify.request("/me/player/devices");
@@ -311,7 +455,7 @@ async function targetDevice() {
 }
 const deviceQuery = id => "?device_id=" + encodeURIComponent(id);
 async function transfer(id) {
-  if (!spotify.connected) { notice("Demo audio plays on this device."); return; }
+  if (!spotify.connected) { notice("Local music plays on this device."); return; }
   const previous = selected;
   const seekInFlight = cancelSeek();
   playbackRevision++;
@@ -337,34 +481,54 @@ function recordRecent(track) {
     recent = [track, ...recent.filter(item => item.id !== track.id)].slice(0, 6);
   }
 }
-function demoSource(track, upcoming) {
-  const file = local.files.get(track.id);
-  if (isLocal(track.id) && !file) throw new Error("This track is no longer in the selected folder.");
-  if (file && spotifyPlayback()) {
+async function playLocal(track, upcoming) {
+  const source = ++sourceRevision;
+  let file = local.files.get(track.id);
+  if (!file && rememberedFolder?.handles?.length) {
+    try {
+      const [root, ...path] = decodeURIComponent(track.id.slice("local:track:".length)).split("/");
+      let directory = rememberedFolder.handles.find(handle => handle.name === root);
+      const filename = path.pop();
+      for (const segment of path) directory = await directory.getDirectoryHandle(segment);
+      file = await (await directory.getFileHandle(filename)).getFile();
+    } catch { /* The folder may need permission, or the file may have moved. */ }
+  }
+  if (source !== sourceRevision) return false;
+  if (!file) return notice("Reconnect the music folder to play this track.");
+  if (spotifyPlayback()) {
     cancelSeek(); playbackRevision++;
     if (spotify.active) spotifyPause = control("pause").catch(() => {});
     sound.volume = volume / 100;
   }
-  sourceRevision++;
-  localPlayback = Boolean(file);
+  localPlayback = true;
   current = track;
   recordRecent(track);
-  if (upcoming) { order = upcoming; queue = upcoming.slice(upcoming.indexOf(track) + 1); }
+  if (upcoming) {
+    order = upcoming;
+    const upcomingTracks = upcoming.slice(upcoming.findIndex(item => item.id === track.id) + 1);
+    const queued = new Set(localQueue.map(item => item.id));
+    localQueue.push(...upcomingTracks.filter(item => !queued.has(item.id)));
+    saveLocalQueue();
+  }
   releaseLocalUrl();
-  if (file) localUrl = URL.createObjectURL(file);
-  audio.src = localUrl || track.audio;
+  localUrl = URL.createObjectURL(file);
+  audio.src = localUrl;
   playing = true;
   render(false, true);
   sound.wake();
-  return audio.play().catch(error => {
+  try {
+    await audio.play();
+    return source === sourceRevision;
+  } catch (error) {
+    if (source !== sourceRevision) return false;
     playing = false;
     render(false, true);
     throw error;
-  });
+  }
 }
 function playbackPayload(target) {
   if (["album", "artist", "playlist"].includes(target.kind)) return { context_uri: target.id };
-  const list = (page === "queue" ? queue : items).filter(item => item.kind === "track");
+  const list = (page === "queue" ? queue : items).filter(item => item.id.startsWith("spotify:track:"));
   if (target.kind !== "track") return { uris: list.slice(0, 100).map(item => item.id) };
   const index = list.findIndex(item => item.id === target.id);
   if (index < 0) return { uris: [target.id] };
@@ -379,27 +543,21 @@ async function play(id) {
   if (!target) return;
   status = "";
   if (isLocal(target.id)) {
-    if (target.tracks) return demoSource(target.tracks[0], target.tracks);
-    const list = page === "detail" && isLocal(detail) ? items : local.tracks;
-    return demoSource(target, list);
-  }
-  if (!spotify.connected) {
-    if (target.tracks) return demoSource(target.tracks[0], target.tracks);
-    const queued = queue.findIndex(x => x.id === target.id);
-    if (page === "queue" && queued >= 0) {
-      queue = queue.slice(queued + 1);
-      return demoSource(target);
+    if (target.kind !== "track") {
+      if (target.tracks?.length) return playLocal(target.tracks[0], target.tracks);
+      return notice("Add some tracks to this playlist first.");
     }
-    const list = items.filter(x => x.kind === "track");
-    return demoSource(target, list.includes(target) ? list : tracks);
+    const context = items.filter(item => item.kind === "track" && isLocal(item.id));
+    return playLocal(target, context.some(item => item.id === target.id) ? context : local.tracks);
   }
+  if (!spotify.connected) return;
   return startSpotifyPlayback(target, playbackPayload(target));
 }
 async function startSpotifyPlayback(target, payload) {
   if (payload.uris?.length === 0) return;
   const source = ++sourceRevision;
   if (localPlayback) {
-    stopDemo(); localPlayback = false; current = {}; queue = []; playing = false;
+    stopLocalAudio(); localPlayback = false; current = {}; queue = []; playing = false;
     render(false, true);
   }
   const seekInFlight = cancelSeek();
@@ -433,7 +591,12 @@ async function control(name, method = "PUT", extra = "", output = spotify.active
 }
 async function toggle() {
   if (!spotifyPlayback()) {
-    if (!audio.getAttribute("src")) return page === "local" ? play("") : demoSource(current.id ? current : tracks[0]);
+    if (!audio.getAttribute("src")) {
+      const track = localQueue[0] || items.find(item => item.kind === "track") || local.tracks[0];
+      if (!track) return notice("Import a music folder or connect Spotify to play music.");
+      if (localQueue[0] === track) return editQueue("queue-play", "0:" + track.id);
+      return play(track.id);
+    }
     if (audio.paused) { sound.wake(); await audio.play(); } else audio.pause();
     return;
   }
@@ -479,26 +642,33 @@ async function nextTrack(previous = false, ended = false) {
   if (previous) {
     if (audio.currentTime > 3) { audio.currentTime = 0; return; }
     const index = order.indexOf(current);
-    return demoSource(order[Math.max(0, index - 1)] || tracks[0], order);
+    const track = order[Math.max(0, index - 1)] || current;
+    if (track.id) return playLocal(track);
+    return;
   }
-  if (!queue.length && repeat) queue = order.slice();
-  if (!queue.length) {
+  if (!localQueue.length && repeat) localQueue = order.slice();
+  if (!localQueue.length) {
     if (ended) { playing = false; render(false, true); }
     return;
   }
-  const index = shuffle ? Math.floor(Math.random() * queue.length) : 0;
-  const [target] = queue.splice(index, 1);
-  if (target) return demoSource(target);
+  const index = shuffle ? Math.floor(Math.random() * localQueue.length) : 0;
+  const target = localQueue[index];
+  const activeQueue = localQueue;
+  if (target && await playLocal(target) && localQueue === activeQueue && localQueue[index] === target) {
+    localQueue.splice(index, 1);
+    saveLocalQueue();
+    render(false, true);
+  }
 }
 async function like(id) {
   if (!id) return;
-  const remove = liked.has(id);
+  const favorites = isLocal(id) ? localLikes : liked;
+  const remove = favorites.has(id);
   if (spotify.connected && !isLocal(id)) await spotify.request("/me/library?" + new URLSearchParams({ uris: id }), remove ? "DELETE" : "PUT");
-  if (remove) liked.delete(id); else liked.add(id);
-  if (!spotify.connected) save("spotifast.demo.liked", [...liked].filter(id => !isLocal(id)));
-  if (page === "liked" || (spotify.connected && ["home", "library"].includes(page))) {
-    items = [...liked].map(i => known.get(i)).filter(Boolean).slice(0, page === "home" ? 12 : 100);
-    caption = items.length ? "" : "Songs you save appear here.";
+  if (remove) favorites.delete(id); else favorites.add(id);
+  if (isLocal(id)) save("zunify.local.likes", [...localLikes]);
+  if (page === "liked" || ["home", "library"].includes(page)) {
+    await navigate(page, "", false, false);
   }
   render(true, true);
   announce(remove ? "Removed from Liked songs" : "Saved to Liked songs");
@@ -511,10 +681,12 @@ async function enqueue(id) {
 function artistAction(name, playNow) {
   const songs = items.filter(item => item.kind === "track" && item.artist === name);
   if (!songs.length) return;
-  if (!playNow) return enqueueTracks({ title: name }, songs);
+  const localArtist = isLocal(songs[0].id);
+  const sourceTracks = songs.filter(song => isLocal(song.id) === localArtist);
+  if (!playNow) return enqueueTracks({ title: name }, sourceTracks);
   status = "";
-  if (!spotify.connected || isLocal(songs[0].id)) return demoSource(songs[0], songs);
-  return startSpotifyPlayback(songs[0], { uris: songs.slice(0, 100).map(item => item.id) });
+  if (localArtist) return playLocal(sourceTracks[0], sourceTracks);
+  if (spotify.connected) return startSpotifyPlayback(sourceTracks[0], { uris: sourceTracks.slice(0, 100).map(item => item.id) });
 }
 async function spotifyQueueTracks(target) {
   if (target.kind === "artist") return catalogArtistTracks(target);
@@ -529,14 +701,17 @@ async function spotifyQueueTracks(target) {
 }
 async function enqueueTracks(target, listedTracks) {
   const localTarget = isLocal(target.id) || isLocal(listedTracks?.[0]?.id);
-  if (localTarget && spotifyPlayback()) return notice("Play a local track to start a local queue.");
-  if (!localTarget && spotify.connected && localPlayback) return notice("Play a Spotify track to use its queue.");
-  if (!spotify.connected || localTarget) {
-    queue.push(...(listedTracks || target.tracks || [target]));
+  if (localTarget) {
+    const tracks = listedTracks || target.tracks || [target];
+    if (!tracks.length) return notice("Add some tracks to this playlist first.");
+    localQueue.push(...tracks);
+    saveLocalQueue();
     render(false, true);
     announce("Added " + target.title + " to queue");
     return;
   }
+  if (spotify.connected && localPlayback) return notice("Play a Spotify track to use its queue.");
+  if (!spotify.connected) return;
   const version = connectionVersion;
   const write = queueWrite.then(async () => {
     if (version !== connectionVersion) return;
@@ -567,28 +742,34 @@ async function enqueueTracks(target, listedTracks) {
   queueWrite = write.catch(() => {});
   return write;
 }
-function editQueue(action, entry) {
-  if (spotifyPlayback()) return;
+async function editQueue(action, entry) {
+  if (spotifyPlayback() && page !== "local-queue") return;
   if (action === "queue-clear") {
-    queue = [];
+    localQueue = [];
     order = [];
   } else {
     const delimiter = entry.indexOf(":");
     if (delimiter < 1) return;
     const index = Number(entry.slice(0, delimiter));
-    const track = queue[index];
+    const track = localQueue[index];
     if (!track || track.id !== entry.slice(delimiter + 1)) return;
     if (action === "queue-play") {
-      queue.splice(0, index + 1);
-      return demoSource(track);
+      const activeQueue = localQueue;
+      if (await playLocal(track) && localQueue === activeQueue && localQueue[index] === track) {
+        localQueue.splice(0, index + 1);
+        saveLocalQueue();
+        render(false, true);
+      }
+      return;
     }
-    if (action === "queue-remove") queue.splice(index, 1);
+    if (action === "queue-remove") localQueue.splice(index, 1);
     else {
       const neighbor = index + (action === "queue-up" ? -1 : 1);
-      if (!queue[neighbor]) return;
-      [queue[index], queue[neighbor]] = [queue[neighbor], queue[index]];
+      if (!localQueue[neighbor]) return;
+      [localQueue[index], localQueue[neighbor]] = [localQueue[neighbor], localQueue[index]];
     }
   }
+  saveLocalQueue();
   render(false, true);
 }
 async function syncQueue() {
@@ -823,8 +1004,8 @@ document.querySelector("#disconnect").onclick = () => {
   playbackPoll = undefined;
   deviceRows = [];
   spotify.signOut();
-  stopDemo(); localPlayback = false; sourceRevision++;
-  sound.release(); selected = ""; known.clear(); demo();
+  stopLocalAudio(); localPlayback = false; sourceRevision++;
+  sound.release(); selected = ""; known.clear(); resetPlayback();
   query = ""; runtime?.setSearchText("");
   settings.close(); navigate("home", "", false, false); render(true, true);
   announce("Signed out of Spotify in Zunify.");
@@ -846,8 +1027,7 @@ audio.addEventListener("loadedmetadata", () => {
 });
 audio.addEventListener("seeked", tick);
 audio.addEventListener("ended", () => nextTrack(false, true).catch(fail));
-audio.addEventListener("error", () => { if (audio.getAttribute("src")) fail(new Error(localPlayback
-  ? "This browser could not decode the local track." : "Could not load the demo audio.")); });
+audio.addEventListener("error", () => { if (audio.getAttribute("src")) fail(new Error("This browser could not decode the local track.")); });
 
 async function artwork(url) {
   if (artRequests.has(url)) return;
@@ -880,6 +1060,8 @@ async function dispatch(action, data) {
   switch (action) {
     case "art": return artwork(data);
     case "import-folder": return chooseMusicFolder();
+    case "rescan-folder": return rescanFolder(true);
+    case "local-playlist": return openPlaylistDialog(data);
     case "local-cover": return findLocalCover(data);
     case "back": {
       if (backTarget) {
@@ -978,24 +1160,30 @@ document.addEventListener("keydown", e => {
     navigate("search");
     return;
   }
-  if (e.code !== "Space" || e.repeat || settings.open || ["TEXTAREA","INPUT","BUTTON"].includes(e.target?.tagName)) return;
+  if (e.code !== "Space" || e.repeat || settings.open || playlistDialog.open || ["TEXTAREA","INPUT","BUTTON"].includes(e.target?.tagName)) return;
   if (e.target?.closest?.("[role=button],[role=slider]")) return;
   e.preventDefault(); toggle().catch(fail);
 });
-demo();
+resetPlayback();
 const auth = spotify.completeSignIn().catch(error => { status = error.message; announce(status); });
 try {
   const loaded = await loadModule({ script: "./spotify-ferro.js", element: document.querySelector("#out") });
   if (!loaded) throw new Error("Could not start FerroUI.");
   const [instance] = await Promise.all([loaded.createRuntime(), auth]);
   if (spotify.connected) {
-    stopDemo(); known.clear(); library = []; items = []; liked.clear(); order = []; queue = []; current = {};
+    stopLocalAudio(); known.clear(); library = []; items = []; liked.clear(); order = []; queue = []; current = {};
     recent = [];
   }
   runtime = instance;
   FerroExports.attach(runtime);
   const previousEntry = history.state?.zunify;
-  if (previousEntry) historyEntry.index = previousEntry.index;
+  if (previousEntry) {
+    historyEntry.index = previousEntry.index;
+    if (previousEntry.page === "local" || isLocal(previousEntry.detail)) {
+      page = historyEntry.page = "local";
+      title = "Local music";
+    }
+  }
   history.replaceState({ zunify: historyEntry }, "");
   runtime.runMain(JSON.stringify(model()), innerWidth, matchMedia("(prefers-reduced-motion: reduce)").matches);
   runtime.installBackNavigation();
@@ -1006,6 +1194,7 @@ try {
   let size;
   addEventListener("resize", () => { cancelAnimationFrame(size); size = requestAnimationFrame(() => runtime.resize(innerWidth)); });
   setInterval(tick, 250);
+  restoreFolder().catch(fail);
   if (spotify.connected) {
     const version = connectionVersion;
     loadLibrary().then(() => {

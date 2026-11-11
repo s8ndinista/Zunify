@@ -62,7 +62,7 @@ export class AudioPath {
     else this.#element.volume = value;
   }
 
-  // The latest window of samples from the demo graph or, with `captured`, from the tab capture.
+  // The latest window of samples from the local audio graph or, with `captured`, from the tab capture.
   // `gain` undoes a volume that was applied before the capture.
   samples(captured = false, gain = 1) {
     const analyser = captured ? this.#capture?.analyser : this.#local;

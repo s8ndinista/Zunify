@@ -1,9 +1,9 @@
 // The app never caches Spotify credentials, API responses, or Spotify artwork.
-const revision = "55451fbeb835d15f";
+const revision = "d3019ed0444a378b";
 const root = new URL("./", self.location.href);
 const prefix = "spotife-static:" + root.pathname + ":";
 const version = prefix + revision;
-const files = ["art/hero.jpg","art/mix-1.jpg","art/mix-2.jpg","art/mix-3.jpg","art/mix-4.jpg","audio.js","audio/sample-1.wav","audio/sample-2.wav","audio/sample-3.wav","audio/sample-4.wav","audio/sample-5.wav","audio/sample-6.wav","demo-library.json","demo.js","ferroui-loader.js","ferroui.js","host.css","icon-192.png","icon-512.png","icon.svg","index.html","local-media.js","main.js","manifest.webmanifest","snippets/spotify-ferro-495f3a2a301764bd/inline0.js","spotify-config.js","spotify-ferro.js","spotify.js","spotify_ferro.wasm","storage.js","update.js"];
+const files = ["audio.js","ferroui-loader.js","ferroui.js","host.css","icon-192.png","icon-512.png","icon.svg","index.html","local-folder-store.js","local-media.js","main.js","manifest.webmanifest","snippets/spotify-ferro-495f3a2a301764bd/inline0.js","spotify-config.js","spotify-ferro.js","spotify.js","spotify_ferro.wasm","storage.js","update.js"];
 const asset = name => {
   const url = new URL(name, root);
   url.searchParams.set("v", revision);

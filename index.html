@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <meta name="theme-color" content="#130e15">
-  <meta name="app-revision" content="55451fbeb835d15f">
+  <meta name="app-revision" content="d3019ed0444a378b">
   <meta name="description" content="Zunify on FerroUI. Browse your library, queue tracks, and listen on this device or with Spotify Connect.">
   <title>Zunify · Your music</title>
   <link rel="manifest" href="./manifest.webmanifest">
@@ -38,7 +38,7 @@
         <input id="client-id" autocomplete="off" spellcheck="false" maxlength="32" required>
       </div>
       <button class="primary" type="submit">Sign in with Spotify</button>
-      <p class="fine">Spotify Premium is required for playback. You can close this window to keep exploring the demo.</p>
+      <p class="fine">Spotify Premium is required for Spotify playback.</p>
     </form>
     <section id="connected" hidden>
       <p>Use this app as a Spotify Connect device, or choose another device from the player.</p>
@@ -49,6 +49,18 @@
       </div>
     </section>
     <p id="settings-status" role="status"></p>
+  </dialog>
+  <dialog id="local-playlist" aria-labelledby="playlist-title">
+    <h2 id="playlist-title">New playlist</h2>
+    <form>
+      <label>Playlist<select></select></label>
+      <label>Playlist name<input maxlength="80" autocomplete="off"></label>
+      <div class="actions">
+        <button type="submit" class="primary">Save playlist</button>
+        <button type="button" data-remove hidden>Remove track</button>
+        <button type="submit" value="cancel" formnovalidate>Cancel</button>
+      </div>
+    </form>
   </dialog>
   <noscript><p class="noscript">Enable JavaScript to run Zunify.</p></noscript>
   <script src="./update.js" defer></script>
