@@ -4,6 +4,7 @@ import { mixes, tracks } from "./demo.js";
 import { PLAYER_NAME, Spotify, itemOf } from "./spotify.js";
 import { AudioPath } from "./audio.js";
 import { spotifyClientId } from "./spotify-config.js";
+import { findCover, pickMusicFiles, readMusicFiles } from "./local-media.js";
 
 const spotify = new Spotify();
 const audio = document.querySelector("audio");
@@ -18,13 +19,20 @@ const sections = [
 ];
 const artRequests = new Set();
 let runtime, nav = 0, searchDelay, seekDelay, volumeDelay, position = 0, updatedAt = 0;
-let library = [], pins = [], recent = [], liked = new Set(), order = [], queue = [], deviceRows = [], selected = "";
+let library = [], recent = [], liked = new Set(), order = [], queue = [], deviceRows = [], selected = "";
 let current = {}, page = "home", detail = "", query = "", title = "", caption = "", status = "";
 let playing = false, shuffle = false, repeat = false, volume = 65, items = [];
 let connectionVersion = 0;
 let recentCommandAt = -Infinity, seekHoldUntil = 0, pendingSeek, seekRequest, seeking = false;
 let playbackRevision = 0, playbackPoll, playbackRefresh;
 let queueWrite = Promise.resolve();
+let local = { tracks: [], albums: [], files: new Map(), covers: new Map() };
+let localPlayback = false, localUrl, importing = false, importVersion = 0, lastCoverLookup = -Infinity;
+let spotifyPause, sourceRevision = 0;
+let historyEntry = { index: 0, page: "home", detail: "", query: "" };
+let backTarget;
+const isLocal = id => id?.startsWith("local:");
+const spotifyPlayback = () => spotify.connected && !localPlayback;
 const read = (name, fallback) => {
   try { return JSON.parse(localStorage.getItem(name)) ?? fallback; } catch { return fallback; }
 };
@@ -39,13 +47,15 @@ const render = (body = true, player = true, reset = false) => {
   if (player) { tick(); pump(); }
 };
 const model = () => ({
-  page, title, caption, detail, query, status, connected: spotify.connected,
-  collections: library.map(decorated), items: items.map(decorated), queue: queue.map(decorated),
-  pins, recent, current: decorated(current), playing, shuffle, repeat, volume,
+  page, title, caption, detail, query, status, connected: spotify.connected, can_go_back: historyEntry.index > 0,
+  collections: page === "local" ? local.albums.map(({ tracks, ...album }) => decorated(album)) : library.map(decorated),
+  items: items.map(decorated), queue: queue.map(decorated),
+  liked_music: page === "home" ? [...liked].map(id => known.get(id)).filter(Boolean).slice(0, 6) : [],
+  recent, current: decorated(current), playing, shuffle, repeat, volume,
 });
 const tick = () => {
   if (!runtime) return;
-  const time = spotify.connected ? pendingSeek?.seconds ?? spotifyPosition() : audio.currentTime;
+  const time = spotifyPlayback() ? pendingSeek?.seconds ?? spotifyPosition() : audio.currentTime;
   runtime.tick(Math.max(0, Math.min(current.duration || 0, time)));
 };
 const spotifyPosition = () => position + (playing && updatedAt ? (performance.now() - updatedAt) / 1000 : 0);
@@ -56,22 +66,63 @@ const pump = () => {
   if (pumping || !playing || !runtime) return;
   pumping = true;
   requestAnimationFrame(function frame() {
-    const heard = !playing ? null : !spotify.connected ? sound.samples()
+    const heard = !playing ? null : !spotifyPlayback() ? sound.samples()
       : sound.capturing ? sound.samples(true, 100 / Math.max(10, volume)) : null;
     // Spotify is out of earshot until the listener shares the tab's audio.
-    runtime.spectrum(heard ?? silence, sound.rate, !spotify.connected || sound.capturing);
+    runtime.spectrum(heard ?? silence, sound.rate, !spotifyPlayback() || sound.capturing);
     if (playing) requestAnimationFrame(frame); else pumping = false;
   });
 };
 const announce = message => { document.querySelector("#announcement").textContent = message; };
 const notice = message => { status = message; announce(message); render(true, false); };
 const fail = error => notice(error?.message || "Something went wrong.");
-const stopDemo = () => { audio.pause(); audio.removeAttribute("src"); audio.load(); };
+const releaseLocalUrl = () => { if (localUrl) URL.revokeObjectURL(localUrl); localUrl = undefined; };
+const stopDemo = () => { audio.pause(); audio.removeAttribute("src"); audio.load(); releaseLocalUrl(); };
+const rememberLocal = () => remember([...local.tracks, ...local.albums]);
+async function importFolder() {
+  if (importing) return;
+  importing = true;
+  try {
+    const entries = await pickMusicFiles();
+    if (!entries) return;
+    if (page === "local") notice("Reading music folder…");
+    const result = await readMusicFiles(entries, ++importVersion);
+    if (!result.tracks.length) throw new Error("No supported audio files were found in that folder.");
+    if (localPlayback) {
+      stopDemo(); localPlayback = false; playing = false; current = {};
+    }
+    order = order.filter(track => !isLocal(track.id));
+    queue = queue.filter(track => !isLocal(track.id));
+    recent = recent.filter(track => !isLocal(track.id));
+    for (const track of local.tracks) { known.delete(track.id); liked.delete(track.id); }
+    for (const album of local.albums) known.delete(album.id);
+    local = result;
+    rememberLocal();
+    if (page === "local" || isLocal(detail)) await navigate("local");
+    render(false, true);
+  } finally { importing = false; }
+}
+
+async function findLocalCover(id) {
+  const album = known.get(id);
+  if (!album || album.art || !local.albums.includes(album)) return;
+  if (!album.artist) return notice("Add an album artist tag to look up this cover.");
+  if (performance.now() - lastCoverLookup < 1000) return;
+  lastCoverLookup = performance.now();
+  notice("Looking up cover art in MusicBrainz…");
+  const requestedPage = nav;
+  const blob = await findCover(album);
+  if (!local.albums.includes(album)) return;
+  album.art = "local-cover:" + id;
+  local.covers.set(album.art, async () => blob);
+  for (const track of album.tracks) track.art = album.art;
+  if (nav === requestedPage) status = "";
+  render(true, true);
+}
 function demo() {
+  rememberLocal();
   remember([...mixes, ...tracks]);
   library = mixes;
-  pins = read("zunify.demo.pins", mixes.slice(0, 2).map(item => item.id))
-    .map(id => known.get(id)).filter(Boolean).slice(0, 6);
   recent = [];
   liked = new Set(read("spotifast.demo.liked", [tracks[0].id, tracks[2].id]));
   volume = read("spotifast.volume", 65);
@@ -106,12 +157,16 @@ async function catalogArtistTracks(artist) {
   return (data?.tracks?.items || []).filter(raw => raw?.artists?.some(entry => entry?.uri === artist.id))
     .map(raw => itemOf(raw, "track")).filter(Boolean);
 }
-async function navigate(next, id = "", preserveStatus = false) {
+async function navigate(next, id = "", preserveStatus = false, record = true) {
+  const push = record && (next !== page || id !== detail);
+  historyEntry = { index: historyEntry.index + Number(push), page: next, detail: id, query };
+  if (push) history.pushState({ zunify: historyEntry }, "");
+  else history.replaceState({ zunify: historyEntry }, "");
   const request = ++nav;
   page = next;
   detail = id;
   const target = known.get(id);
-  title = ({ home: "Quickplay", search: "Browse", library: "Collection", liked: "Liked songs",
+  title = ({ home: "Quickplay", search: "Browse", library: "Collection", local: "Local music", liked: "Liked songs",
     detail: target?.title || "Collection", devices: "Playback devices", queue: "Queue" })[next];
   caption = "";
   if (!preserveStatus) status = "";
@@ -121,6 +176,7 @@ async function navigate(next, id = "", preserveStatus = false) {
   };
   const saved = () => [...liked].map(id => known.get(id)).filter(Boolean);
   items = next === "home" ? (spotify.connected ? saved().slice(0, 12) : tracks) :
+    next === "local" ? local.tracks :
     next === "library" ? [...remember(sections), ...(spotify.connected ? saved() : tracks)] :
     next === "liked" ? saved() : next === "search" && !query && !spotify.connected ? mixes : [];
   if (next === "search") caption = query ? "Looking for music…" : "Search for a song, album, artist, or playlist.";
@@ -130,6 +186,7 @@ async function navigate(next, id = "", preserveStatus = false) {
     : "Demo audio plays on this device. Connect Spotify to see your Spotify Connect devices.";
   if (next === "liked" && !items.length) caption = "Songs you save appear here.";
   if (next === "library" && !items.length) caption = "Your Spotify playlists appear here.";
+  if (next === "local" && !items.length) status = "Choose a music folder to import your albums and tracks.";
   render(true, next === "queue", true);
   try {
     if (next === "search" && query) {
@@ -144,7 +201,9 @@ async function navigate(next, id = "", preserveStatus = false) {
         set(found, found.length ? "Spotify search results" : "No results found.");
       }
     } else if (next === "detail" && target) {
-      if (id === "section:albums" || id === "section:artists") {
+      if (isLocal(id)) {
+        set(target.tracks ?? [], target.artist);
+      } else if (id === "section:albums" || id === "section:artists") {
         const albums = id.endsWith("albums");
         const result = await (albums ? spotify.page("/me/albums?limit=50")
           : spotify.page("/me/following?type=artist&limit=50", 100, "artists"));
@@ -176,6 +235,27 @@ async function navigate(next, id = "", preserveStatus = false) {
     if (request === nav) fail(error);
   }
 }
+
+function restoreHistory(entry) {
+  clearTimeout(searchDelay);
+  historyEntry = entry;
+  query = entry.query;
+  runtime.setSearchText(query);
+  if (isLocal(entry.detail) && !known.has(entry.detail)) return navigate("local", "", false, false);
+  return navigate(entry.page, entry.detail, false, false);
+}
+
+// FerroUI's sentinel helper only handles Back. Actual route entries preserve browser Forward.
+addEventListener("popstate", event => {
+  const entry = event.state?.zunify;
+  if (!runtime || !entry) return;
+  if (entry.index < historyEntry.index) {
+    backTarget = entry;
+    if (FerroExports.NavigationHelper?.OnBackRequested?.()) return;
+    backTarget = undefined;
+  }
+  restoreHistory(entry).catch(fail);
+});
 
 async function getDevices() {
   if (!spotify.connected) { deviceRows = [{ id: "demo", title: "This device" }]; return; }
@@ -227,10 +307,21 @@ function recordRecent(track) {
   }
 }
 function demoSource(track, upcoming) {
+  const file = local.files.get(track.id);
+  if (isLocal(track.id) && !file) throw new Error("This track is no longer in the selected folder.");
+  if (file && spotifyPlayback()) {
+    cancelSeek(); playbackRevision++;
+    if (spotify.active) spotifyPause = control("pause").catch(() => {});
+    sound.volume = volume / 100;
+  }
+  sourceRevision++;
+  localPlayback = Boolean(file);
   current = track;
   recordRecent(track);
   if (upcoming) { order = upcoming; queue = upcoming.slice(upcoming.indexOf(track) + 1); }
-  audio.src = track.audio;
+  releaseLocalUrl();
+  if (file) localUrl = URL.createObjectURL(file);
+  audio.src = localUrl || track.audio;
   playing = true;
   render(false, true);
   sound.wake();
@@ -256,6 +347,11 @@ async function play(id) {
   if (!target && !id) target = items.find(x => x.kind === "track");
   if (!target) return;
   status = "";
+  if (isLocal(target.id)) {
+    if (target.tracks) return demoSource(target.tracks[0], target.tracks);
+    const list = page === "detail" && isLocal(detail) ? items : local.tracks;
+    return demoSource(target, list);
+  }
   if (!spotify.connected) {
     if (target.tracks) return demoSource(target.tracks[0], target.tracks);
     const queued = queue.findIndex(x => x.id === target.id);
@@ -270,6 +366,11 @@ async function play(id) {
 }
 async function startSpotifyPlayback(target, payload) {
   if (payload.uris?.length === 0) return;
+  const source = ++sourceRevision;
+  if (localPlayback) {
+    stopDemo(); localPlayback = false; current = {}; queue = []; playing = false;
+    render(false, true);
+  }
   const seekInFlight = cancelSeek();
   const version = connectionVersion;
   resumeCapture();
@@ -277,11 +378,12 @@ async function startSpotifyPlayback(target, payload) {
   const output = await targetDevice();
   if (output === spotify.device) await spotify.player.activateElement();
   await seekInFlight;
-  if (version !== connectionVersion) return;
+  await spotifyPause;
+  if (version !== connectionVersion || source !== sourceRevision) return;
   recentCommandAt = performance.now();
   const revision = ++playbackRevision;
   await spotify.request("/me/player/play" + deviceQuery(output), "PUT", payload);
-  if (version !== connectionVersion) return;
+  if (version !== connectionVersion || source !== sourceRevision) return;
   refreshPlayback();
   if (revision !== playbackRevision) return;
   spotify.active = output;
@@ -299,8 +401,8 @@ async function control(name, method = "PUT", extra = "", output = spotify.active
   await spotify.request("/me/player/" + name + deviceQuery(output) + extra, method, body);
 }
 async function toggle() {
-  if (!spotify.connected) {
-    if (!audio.getAttribute("src")) return demoSource(current.id ? current : tracks[0]);
+  if (!spotifyPlayback()) {
+    if (!audio.getAttribute("src")) return page === "local" ? play("") : demoSource(current.id ? current : tracks[0]);
     if (audio.paused) { sound.wake(); await audio.play(); } else audio.pause();
     return;
   }
@@ -336,7 +438,7 @@ async function toggle() {
   render(false, true);
 }
 async function nextTrack(previous = false, ended = false) {
-  if (spotify.connected) {
+  if (spotifyPlayback()) {
     await cancelSeek();
     playbackRevision++;
     await control(previous ? "previous" : "next", "POST");
@@ -360,9 +462,9 @@ async function nextTrack(previous = false, ended = false) {
 async function like(id) {
   if (!id) return;
   const remove = liked.has(id);
-  if (spotify.connected) await spotify.request("/me/library?" + new URLSearchParams({ uris: id }), remove ? "DELETE" : "PUT");
+  if (spotify.connected && !isLocal(id)) await spotify.request("/me/library?" + new URLSearchParams({ uris: id }), remove ? "DELETE" : "PUT");
   if (remove) liked.delete(id); else liked.add(id);
-  if (!spotify.connected) save("spotifast.demo.liked", [...liked]);
+  if (!spotify.connected) save("spotifast.demo.liked", [...liked].filter(id => !isLocal(id)));
   if (page === "liked" || (spotify.connected && ["home", "library"].includes(page))) {
     items = [...liked].map(i => known.get(i)).filter(Boolean).slice(0, page === "home" ? 12 : 100);
     caption = items.length ? "" : "Songs you save appear here.";
@@ -380,7 +482,7 @@ function artistAction(name, playNow) {
   if (!songs.length) return;
   if (!playNow) return enqueueTracks({ title: name }, songs);
   status = "";
-  if (!spotify.connected) return demoSource(songs[0], songs);
+  if (!spotify.connected || isLocal(songs[0].id)) return demoSource(songs[0], songs);
   return startSpotifyPlayback(songs[0], { uris: songs.slice(0, 100).map(item => item.id) });
 }
 async function spotifyQueueTracks(target) {
@@ -395,7 +497,10 @@ async function spotifyQueueTracks(target) {
   return target.kind === "track" ? [target] : [];
 }
 async function enqueueTracks(target, listedTracks) {
-  if (!spotify.connected) {
+  const localTarget = isLocal(target.id) || isLocal(listedTracks?.[0]?.id);
+  if (localTarget && spotifyPlayback()) return notice("Play a local track to start a local queue.");
+  if (!localTarget && spotify.connected && localPlayback) return notice("Play a Spotify track to use its queue.");
+  if (!spotify.connected || localTarget) {
     queue.push(...(listedTracks || target.tracks || [target]));
     render(false, true);
     announce("Added " + target.title + " to queue");
@@ -432,7 +537,7 @@ async function enqueueTracks(target, listedTracks) {
   return write;
 }
 function editQueue(action, entry) {
-  if (spotify.connected) return;
+  if (spotifyPlayback()) return;
   if (action === "queue-clear") {
     queue = [];
     order = [];
@@ -456,11 +561,11 @@ function editQueue(action, entry) {
   render(false, true);
 }
 async function syncQueue() {
-  if (!spotify.connected) return;
+  if (!spotifyPlayback()) return;
   const version = connectionVersion;
   try {
     const response = await spotify.request("/me/player/queue");
-    if (version !== connectionVersion) return;
+    if (version !== connectionVersion || localPlayback) return;
     if (!Array.isArray(response?.queue)) return;
     const next = remember(response.queue.map(x => itemOf(x))).slice(0, 20);
     if (next.map(x => x.id).join() !== queue.map(x => x.id).join()) {
@@ -469,7 +574,7 @@ async function syncQueue() {
   } catch { /* Some Spotify app modes do not expose the remote queue. */ }
 }
 function setPlaying(track, isPlaying, seconds, output = spotify.device, settings = {}) {
-  if (!spotify.connected || !track) return;
+  if (!spotifyPlayback() || !track) return;
   const changedTrack = current.id !== track.id;
   const changed = changedTrack || track.title !== current.title || track.artist !== current.artist ||
     track.album !== current.album ||
@@ -493,6 +598,7 @@ function setPlaying(track, isPlaying, seconds, output = spotify.device, settings
 spotify.error = fail;
 spotify.devicesChanged = () => { if (page === "devices") navigate("devices"); };
 spotify.state = state => {
+  if (localPlayback) return;
   if (selected && selected !== "browser" && selected !== spotify.device) return;
   if (!selected && spotify.active && spotify.active !== spotify.device) return;
   const track = itemOf(state.track_window?.current_track);
@@ -514,7 +620,7 @@ function refreshPlayback() {
   playbackRefresh = setTimeout(syncPlayback, 900);
 }
 async function syncPlayback() {
-  if (!spotify.connected || playbackPoll) return;
+  if (!spotifyPlayback() || playbackPoll) return;
   const version = connectionVersion;
   const revision = playbackRevision;
   const poll = (async () => {
@@ -681,8 +787,10 @@ document.querySelector("#disconnect").onclick = () => {
   cancelSeek();
   clearTimeout(playbackRefresh);
   playbackPoll = undefined;
+  stopDemo(); localPlayback = false; sourceRevision++;
   spotify.signOut(); sound.release(); selected = ""; known.clear(); demo();
-  settings.close(); navigate("home"); render(true, true);
+  query = ""; runtime?.setSearchText("");
+  settings.close(); navigate("home", "", false, false); render(true, true);
 };
 document.querySelector("#enable-playback").onclick = async () => {
   settingsStatus.textContent = "Starting playback…";
@@ -691,14 +799,30 @@ document.querySelector("#enable-playback").onclick = async () => {
     settings.close();
   } catch (error) { settingsStatus.textContent = error.message; }
 };
-audio.addEventListener("play", () => { if (!spotify.connected && !playing) { playing = true; render(false, true); } });
-audio.addEventListener("pause", () => { if (!spotify.connected && playing) { playing = false; render(false, true); } });
+audio.addEventListener("play", () => { if (!spotifyPlayback() && !audio.paused && !playing) { playing = true; render(false, true); } });
+audio.addEventListener("pause", () => { if (!spotifyPlayback() && audio.paused && playing) { playing = false; render(false, true); } });
+audio.addEventListener("loadedmetadata", () => {
+  if (localPlayback && !current.duration && Number.isFinite(audio.duration)) {
+    current.duration = audio.duration;
+    render(true, true);
+  }
+});
 audio.addEventListener("seeked", tick);
 audio.addEventListener("ended", () => nextTrack(false, true).catch(fail));
-audio.addEventListener("error", () => { if (audio.getAttribute("src")) fail(new Error("Could not load the demo audio.")); });
+audio.addEventListener("error", () => { if (audio.getAttribute("src")) fail(new Error(localPlayback
+  ? "This browser could not decode the local track." : "Could not load the demo audio.")); });
 
 async function artwork(url) {
   if (artRequests.has(url)) return;
+  if (url.startsWith("local-cover:")) {
+    artRequests.add(url);
+    try {
+      const blob = await local.covers.get(url)?.();
+      runtime?.setImage(url, blob ? new Uint8Array(await blob.arrayBuffer()) : new Uint8Array());
+    } catch { runtime?.setImage(url, new Uint8Array()); }
+    finally { artRequests.delete(url); }
+    return;
+  }
   const target = new URL(url, location.href);
   if (target.origin !== location.origin && target.protocol !== "https:") {
     runtime?.setImage(url, new Uint8Array());
@@ -718,6 +842,17 @@ async function artwork(url) {
 async function dispatch(action, data) {
   switch (action) {
     case "art": return artwork(data);
+    case "import-folder": return importFolder();
+    case "local-cover": return findLocalCover(data);
+    case "back": {
+      if (backTarget) {
+        const entry = backTarget;
+        backTarget = undefined;
+        return restoreHistory(entry);
+      }
+      if (historyEntry.index > 0) history.back();
+      return;
+    }
     case "navigate":
       clearTimeout(searchDelay);
       if (data === "search") runtime?.focusSearch?.();
@@ -739,15 +874,6 @@ async function dispatch(action, data) {
       return;
     }
     case "settings": return openSettings();
-    case "pin": {
-      const index = pins.findIndex(item => item.id === data);
-      if (index >= 0) pins.splice(index, 1);
-      else if (pins.length >= 6) return notice("Quickplay holds six pins. Remove one to make room.");
-      else if (known.has(data)) pins.push(known.get(data));
-      if (!spotify.connected) save("zunify.demo.pins", pins.map(item => item.id));
-      render(true, false);
-      return;
-    }
     case "play": return play(data);
     case "toggle": return toggle();
     case "next": return nextTrack();
@@ -762,22 +888,22 @@ async function dispatch(action, data) {
     case "queue-remove":
     case "queue-clear": return editQueue(action, data);
     case "devices": return navigate("devices");
-    case "transfer": return transfer(data);
+    case "transfer": return localPlayback ? notice("Play a Spotify track before switching Spotify devices.") : transfer(data);
     case "seek": {
       const value = Number(data);
       if (!Number.isFinite(value)) return;
-      if (!spotify.connected) { if (audio.getAttribute("src")) audio.currentTime = value; }
+      if (!spotifyPlayback()) { if (audio.getAttribute("src")) audio.currentTime = value; }
       else queueSeek(value);
       return;
     }
     case "volume": {
       volume = Math.round(Number(data));
-      if (!spotify.connected) { sound.volume = volume / 100; save("spotifast.volume", volume); }
+      if (!spotifyPlayback()) { sound.volume = volume / 100; save("spotifast.volume", volume); }
       else {
         const version = connectionVersion;
         clearTimeout(volumeDelay);
         volumeDelay = setTimeout(() => {
-          if (version !== connectionVersion) return;
+          if (version !== connectionVersion || localPlayback) return;
           if (spotify.active === spotify.device && spotify.player) spotify.player.setVolume(volume / 100).catch(fail);
           else control("volume", "PUT", "&volume_percent=" + volume).catch(fail);
         }, 180);
@@ -787,10 +913,10 @@ async function dispatch(action, data) {
     case "shuffle":
     case "repeat":
       if (action === "shuffle") {
-        if (spotify.connected) await control("shuffle", "PUT", "&state=" + !shuffle);
+        if (spotifyPlayback()) await control("shuffle", "PUT", "&state=" + !shuffle);
         shuffle = !shuffle;
       } else {
-        if (spotify.connected) await control("repeat", "PUT", "&state=" + (repeat ? "off" : "context"));
+        if (spotifyPlayback()) await control("repeat", "PUT", "&state=" + (repeat ? "off" : "context"));
         repeat = !repeat;
       }
       return render(false, true);
@@ -827,11 +953,15 @@ try {
   const [instance] = await Promise.all([loaded.createRuntime(), auth]);
   if (spotify.connected) {
     stopDemo(); known.clear(); library = []; items = []; liked.clear(); order = []; queue = []; current = {};
-    pins = []; recent = [];
+    recent = [];
   }
   runtime = instance;
   FerroExports.attach(runtime);
+  const previousEntry = history.state?.zunify;
+  if (previousEntry) historyEntry.index = previousEntry.index;
+  history.replaceState({ zunify: historyEntry }, "");
   runtime.runMain(JSON.stringify(model()), innerWidth, matchMedia("(prefers-reduced-motion: reduce)").matches);
+  runtime.installBackNavigation();
   const clearReveal = () => runtime.clearReveal?.();
   document.querySelector("#out").addEventListener("pointerleave", clearReveal);
   addEventListener("blur", clearReveal);
