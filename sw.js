@@ -1,5 +1,5 @@
 // The app never caches Spotify credentials, API responses, or Spotify artwork.
-const revision = "6652895f1cc63b30";
+const revision = "4df8371db9bac8b2";
 const root = new URL("./", self.location.href);
 const prefix = "spotife-static:" + root.pathname + ":";
 const version = prefix + revision;
