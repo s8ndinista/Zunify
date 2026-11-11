@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <meta name="theme-color" content="#130e15">
-  <meta name="app-revision" content="4df8371db9bac8b2">
+  <meta name="app-revision" content="9771c9e587208adb">
   <meta name="description" content="SpotiFe on FerroUI. Browse your library, queue tracks, and listen on this device or with Spotify Connect.">
   <title>SpotiFe · Your music</title>
   <link rel="manifest" href="./manifest.webmanifest">
@@ -43,6 +43,10 @@
     <section id="connected" hidden>
       <p>Use this app as a Spotify Connect device, or choose another device from the player.</p>
       <div class="actions"><button type="button" id="enable-playback" class="primary">Play on this device</button><button type="button" id="disconnect">Sign out</button></div>
+      <div id="spectrum" hidden>
+        <p class="fine">Spotify plays protected audio that the app cannot analyze directly. To light the spectrum, share this tab with its audio when your browser asks. The sound stays on this page.</p>
+        <div class="actions"><button type="button" id="spectrum-toggle">Show the spectrum for Spotify</button></div>
+      </div>
     </section>
     <p id="settings-status" role="status"></p>
   </dialog>

@@ -2,10 +2,12 @@ import { FerroExports } from "./ferroui.js";
 import { loadModule } from "./ferroui-loader.js";
 import { mixes, tracks } from "./demo.js";
 import { Spotify, itemOf } from "./spotify.js";
+import { AudioPath } from "./audio.js";
 import { spotifyClientId } from "./spotify-config.js";
 
 const spotify = new Spotify();
 const audio = document.querySelector("audio");
+const sound = new AudioPath(audio);
 const settings = document.querySelector("#settings");
 const settingsStatus = document.querySelector("#settings-status");
 const known = new Map();
@@ -32,7 +34,7 @@ const decorated = item => ({ ...item, liked: liked.has(item.id) });
 const render = (body = true, player = true, reset = false) => {
   if (!runtime) return;
   runtime.updateModel(JSON.stringify(model()), body || (player && (page === "home" || page === "queue")), player, reset);
-  if (player) tick();
+  if (player) { tick(); pump(); }
 };
 const model = () => ({
   page, title, caption, detail, query, status, connected: spotify.connected,
@@ -43,6 +45,20 @@ const tick = () => {
   if (!runtime || performance.now() < skipProgressUntil) return;
   const time = spotify.connected ? position + (playing && updatedAt ? (performance.now() - updatedAt) / 1000 : 0) : audio.currentTime;
   runtime.tick(Math.max(0, Math.min(current.duration || 0, time)));
+};
+// While music plays, each frame hands the analyser the samples that are sounding right now.
+const silence = new Float32Array(0);
+let pumping = false;
+const pump = () => {
+  if (pumping || !playing || !runtime) return;
+  pumping = true;
+  requestAnimationFrame(function frame() {
+    const heard = !playing ? null : !spotify.connected ? sound.samples()
+      : sound.capturing ? sound.samples(true, 100 / Math.max(10, volume)) : null;
+    // Spotify is out of earshot until the listener shares the tab's audio.
+    runtime.spectrum(heard ?? silence, sound.rate, !spotify.connected || sound.capturing);
+    if (playing) requestAnimationFrame(frame); else pumping = false;
+  });
 };
 const announce = message => { document.querySelector("#announcement").textContent = message; };
 const notice = message => { status = message; announce(message); render(true, false); };
@@ -56,7 +72,7 @@ function demo() {
   recent = [];
   liked = new Set(read("spotifast.demo.liked", [tracks[0].id, tracks[2].id]));
   volume = read("spotifast.volume", 65);
-  audio.volume = volume / 100;
+  sound.volume = volume / 100;
   current = tracks[0];
   order = tracks;
   queue = tracks.slice(1);
@@ -202,6 +218,7 @@ function demoSource(track, upcoming) {
   audio.src = track.audio;
   playing = true;
   render(false, true);
+  sound.wake();
   return audio.play().catch(error => {
     playing = false;
     render(false, true);
@@ -224,6 +241,7 @@ async function play(id) {
     return demoSource(target, list.includes(target) ? list : tracks);
   }
   recentCommandAt = performance.now();
+  resumeCapture();
   if ((!selected || selected === "browser") && spotify.player) await spotify.player.activateElement();
   const output = await targetDevice();
   if (output === spotify.device) await spotify.player.activateElement();
@@ -249,9 +267,10 @@ async function control(name, method = "PUT", extra = "") {
 async function toggle() {
   if (!spotify.connected) {
     if (!audio.getAttribute("src")) return demoSource(current.id ? current : tracks[0]);
-    if (audio.paused) await audio.play(); else audio.pause();
+    if (audio.paused) { sound.wake(); await audio.play(); } else audio.pause();
     return;
   }
+  resumeCapture();
   if (!current.id && items.length) return play(items.find(x => x.kind === "track")?.id || library[0]?.id);
   const nextPlaying = !playing;
   const version = connectionVersion;
@@ -358,6 +377,45 @@ async function syncPlayback() {
   } catch { /* A remote device can disappear between polls. */ }
 }
 
+// Spotify's protected stream never passes through the page, so its spectrum needs the listener to
+// share this tab's audio. The choice is remembered; the browser still asks once per visit.
+const spectrumToggle = document.querySelector("#spectrum-toggle");
+const showSpectrumSetting = () => {
+  document.querySelector("#spectrum").hidden = !sound.canCapture;
+  spectrumToggle.textContent = sound.capturing ? "Stop sharing tab audio" : "Show the spectrum for Spotify";
+};
+sound.changed = showSpectrumSetting;
+async function capture() {
+  try {
+    await sound.capture();
+    save("spotife.spectrum", true);
+  } catch (error) {
+    if (error.name === "NotAllowedError") save("spotife.spectrum", false);
+    throw error;
+  } finally { showSpectrumSetting(); }
+}
+let captureResumed = false;
+function resumeCapture() {
+  if (captureResumed || sound.capturing || !sound.canCapture || (selected && selected !== "browser")) return;
+  if (!read("spotife.spectrum", false)) return;
+  captureResumed = true;
+  capture().catch(() => {});
+}
+spectrumToggle.onclick = async () => {
+  if (sound.capturing) {
+    sound.release();
+    save("spotife.spectrum", false);
+    settingsStatus.textContent = "";
+    return;
+  }
+  try {
+    await capture();
+    settingsStatus.textContent = "The spectrum now follows the music playing in this tab.";
+  } catch (error) {
+    settingsStatus.textContent = error.name === "NotAllowedError" ? "Tab audio was not shared." : error.message;
+  }
+};
+
 const clientIdInput = document.querySelector("#client-id");
 let authorizing = false;
 
@@ -366,6 +424,7 @@ function showSettings(message = "") {
   document.querySelector("#redirect-uri").value = spotify.redirect;
   document.querySelector("#signin").hidden = spotify.connected;
   document.querySelector("#connected").hidden = !spotify.connected;
+  showSpectrumSetting();
   document.querySelector("#developer-setup").hidden = Boolean(spotifyClientId);
   clientIdInput.disabled = Boolean(spotifyClientId);
   if (!spotifyClientId) clientIdInput.value = read("spotifast.client-id", "");
@@ -400,7 +459,7 @@ document.querySelector("#signin").addEventListener("submit", event => {
 });
 document.querySelector("#disconnect").onclick = () => {
   connectionVersion++;
-  spotify.signOut(); selected = ""; known.clear(); demo();
+  spotify.signOut(); sound.release(); selected = ""; known.clear(); demo();
   settings.close(); navigate("home"); render(true, true);
 };
 document.querySelector("#enable-playback").onclick = async () => {
@@ -492,7 +551,7 @@ async function dispatch(action, data) {
     }
     case "volume": {
       volume = Math.round(Number(data));
-      if (!spotify.connected) { audio.volume = volume / 100; save("spotifast.volume", volume); }
+      if (!spotify.connected) { sound.volume = volume / 100; save("spotifast.volume", volume); }
       else {
         const version = connectionVersion;
         clearTimeout(volumeDelay);
