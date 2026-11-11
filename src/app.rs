@@ -107,6 +107,8 @@ struct Ui {
     width: f64,
     reduced: bool,
     shell: Option<Ref<Border>>,
+    #[cfg(target_os = "emscripten")]
+    reveal: Option<WeakRef<Border>>,
     body: Option<Ref<Border>>,
     main: Option<Ref<ScrollViewer>>,
     collection: Option<Rc<CollectionView>>,
@@ -667,9 +669,14 @@ fn scroll_repeat(name: &str, arrow_up: Option<bool>) -> Ref<RepeatButton> {
     button
 }
 fn build() {
-    let (width, host, model) = UI.with(|s| {
+    let (width, host, model, reduced) = UI.with(|s| {
         let s = s.borrow();
-        (s.width, s.shell.clone().unwrap(), s.model.clone())
+        (
+            s.width,
+            s.shell.clone().unwrap(),
+            s.model.clone(),
+            s.reduced,
+        )
     });
     let mobile = width < 790.0;
     let root = grid("", if mobile { "99,*,77" } else { "76,*,86" });
@@ -711,8 +718,23 @@ fn build() {
     transport.set_child(layers);
     put(&root, 0, 2, transport.clone().upcast());
 
+    let _reveal = if !reduced {
+        // Paint over the page backgrounds and clip only at the app's outer edge.
+        let lighting = Border::new();
+        lighting.set_is_hit_test_visible(false);
+        Grid::set_row_span(&lighting, 3);
+        put(&root, 0, 0, lighting.clone().upcast());
+        Some(effects::reveal_light(&root, &lighting))
+    } else {
+        None
+    };
+
     UI.with(|s| {
         let mut s = s.borrow_mut();
+        #[cfg(target_os = "emscripten")]
+        {
+            s.reveal = _reveal;
+        }
         s.fire = Some(effects::TransportFire::new(&backdrop, s.reduced));
         s.body = Some(body);
         s.main = Some(main);
@@ -1423,7 +1445,7 @@ struct CollectionView {
 }
 
 impl CollectionView {
-    fn new(m: &Model, width: f64, animate: bool, reduced: bool) -> Self {
+    fn new(m: &Model, width: f64, animate: bool) -> Self {
         let compact = width < 790.0;
         let cols = if width >= 1360.0 {
             4
@@ -1436,15 +1458,6 @@ impl CollectionView {
         let inset = if compact { 16.0 } else { 44.0 };
         root.set_margin(Thickness::new(inset, 16.0, inset, 16.0));
         root.set_max_width(1370.0);
-        if !reduced {
-            root.set_background(Some(brush("Transparent")));
-            let backdrop = surface("Transparent", 0.0, 0.0);
-            backdrop.set_is_hit_test_visible(false);
-            backdrop.set_clip_to_bounds(true);
-            Grid::set_row_span(&backdrop, 4);
-            put(&root, 0, 0, backdrop.clone().upcast());
-            effects::reveal_light(&root, &backdrop);
-        }
 
         let heading = surface("Transparent", 0.0, 0.0);
         heading.set_horizontal_alignment(H::Left);
@@ -2057,8 +2070,7 @@ fn refresh(body: bool, playback: bool, animate: bool) {
             if m.page == "library" {
                 let existing = UI.with(|ui| ui.borrow().collection.clone());
                 let view = existing.unwrap_or_else(|| {
-                    let view =
-                        Rc::new(CollectionView::new(&m, width, animate && !reduced, reduced));
+                    let view = Rc::new(CollectionView::new(&m, width, animate && !reduced));
                     UI.with(|ui| ui.borrow_mut().collection = Some(view.clone()));
                     if let Some(main) = &main {
                         main.set_content(None);
@@ -2094,6 +2106,14 @@ fn refresh(body: bool, playback: bool, animate: bool) {
 
 fn is_collection(page: &str) -> bool {
     matches!(page, "library" | "liked" | "detail")
+}
+
+#[cfg(target_os = "emscripten")]
+#[wasm_bindgen(js_name = clearReveal)]
+pub fn clear_reveal() {
+    if let Some(glow) = UI.with(|ui| ui.borrow().reveal.as_ref().and_then(WeakRef::upgrade)) {
+        glow.set_opacity(0.0);
+    }
 }
 
 #[cfg(target_os = "emscripten")]

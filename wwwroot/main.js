@@ -552,6 +552,9 @@ try {
   runtime = instance;
   FerroExports.attach(runtime);
   runtime.runMain(JSON.stringify(model()), innerWidth, matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const clearReveal = () => runtime.clearReveal?.();
+  document.querySelector("#out").addEventListener("pointerleave", clearReveal);
+  addEventListener("blur", clearReveal);
   document.querySelector("#splash").remove();
   let size;
   addEventListener("resize", () => { cancelAnimationFrame(size); size = requestAnimationFrame(() => runtime.resize(innerWidth)); });

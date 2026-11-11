@@ -43,7 +43,7 @@ pub(crate) fn light(host: &Border) {
     host.set_effect(Some(ImmutableCustomEffect::new(AmbientLight).into()));
 }
 
-pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) {
+pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) -> WeakRef<Border> {
     const WIDTH: f64 = 350.0;
     const HEIGHT: f64 = 300.0;
     let glow = Border::new();
@@ -100,6 +100,7 @@ pub(crate) fn reveal_light(region: &Grid, backdrop: &Ref<Border>) {
             glow.set_opacity(0.0);
         }
     });
+    glow.downgrade()
 }
 
 // FerroUI transports each Rect as a float4 with no colour conversion.
