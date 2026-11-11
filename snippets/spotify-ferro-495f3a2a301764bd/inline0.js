@@ -1,0 +1,1 @@
+export function send(action, data) { globalThis.spotifyFerroAction?.(action, data); }
