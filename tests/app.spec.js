@@ -119,7 +119,7 @@ test.describe("mocked Spotify integration", () => {
         contentType: "application/javascript",
         body: `window.Spotify={Player:class {
           listeners={}; addListener(n,cb){this.listeners[n]=cb;}
-          connect(){queueMicrotask(()=>this.listeners.ready({device_id:"web-spotife"}));return Promise.resolve(true);}
+          connect(){window.mockSpotifyPlayer=this;queueMicrotask(()=>this.listeners.ready({device_id:"web-spotife"}));return Promise.resolve(true);}
           disconnect(){} activateElement(){return Promise.resolve();}
         }}; window.onSpotifyWebPlaybackSDKReady();`,
       }));
@@ -148,6 +148,16 @@ test.describe("mocked Spotify integration", () => {
           });
           if (url.pathname === "/v1/me/tracks") return Response.json({ items: saved });
           if (url.pathname === "/v1/me/playlists") return Response.json({ items: playlists });
+          if (url.pathname === "/v1/me/player/pause") {
+            if (largeLibrary) {
+              window.mockSpotifyPlayer.listeners.player_state_changed({
+                track_window: { current_track: raw }, paused: true, position: 1200,
+              });
+            }
+            return new Response("spotifyPlaybackAcknowledgement", {
+              headers: { "Content-Type": "text/plain" },
+            });
+          }
           return new Response(null, { status: 204 });
         };
       }, { raw, largeLibrary: mode === "shared" });
@@ -171,6 +181,18 @@ test.describe("mocked Spotify integration", () => {
         params: { device_id: "web-spotife" }, body: { uris: ["spotify:track:test"] },
         authorization: "Bearer test-token",
       });
+      await press(page, "Pause");
+      await expect.poll(() => request("/v1/me/player/pause")).toMatchObject({
+        method: "PUT", params: { device_id: "web-spotife" },
+      });
+      await expect(button(page, "Play")).toBeAttached();
+      await expect(page.locator("#announcement")).toHaveText("");
+      await press(page, "Play");
+      await expect.poll(() => page.evaluate(() => window.spotifyRequests
+        .filter(r => r.path === "/v1/me/player/play").map(r => r.body))).toEqual([
+        { uris: ["spotify:track:test"] }, null,
+      ]);
+      await expect(button(page, "Pause")).toBeAttached();
       await press(page, "Like current track");
       await expect.poll(() => request("/v1/me/library")).toMatchObject({
         method: "DELETE", params: { uris: "spotify:track:test" },

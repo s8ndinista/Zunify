@@ -111,8 +111,14 @@ export class Spotify {
         429: "Spotify is limiting requests. Give it a moment before trying again.",
       })[r.status] || detail?.error?.message || "Spotify request failed (" + r.status + ").");
     }
-    const json = await r.text();
-    return json ? JSON.parse(json) : null;
+    // Write endpoints acknowledge the command. Only reads return data to the app.
+    if (method !== "GET" || r.status === 204) return null;
+    const json = (await r.text()).trim();
+    try {
+      return json ? JSON.parse(json) : null;
+    } catch {
+      throw new SpotifyError(r.status, "Spotify returned an unreadable response.");
+    }
   }
 
   async page(path, limit = 100, key) {
