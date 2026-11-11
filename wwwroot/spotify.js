@@ -2,6 +2,7 @@ const accounts = "https://accounts.spotify.com";
 const api = "https://api.spotify.com/v1";
 const key = "spotifast.spotify.session";
 const pending = "spotifast.spotify.pending";
+export const PLAYER_NAME = "Zunify";
 const scope = [
   "streaming", "user-read-email", "user-read-private", "user-library-read",
   "user-library-modify", "user-follow-read", "playlist-read-private", "playlist-read-collaborative",
@@ -173,7 +174,7 @@ export class Spotify {
     }
     if (generation !== this.generation) throw new Error("Spotify signed out.");
     const player = this.player = new window.Spotify.Player({
-      name: "Zunify",
+      name: PLAYER_NAME,
       getOAuthToken: callback => this.token().then(callback).catch(this.error),
       volume: 0.65,
     });

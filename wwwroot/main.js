@@ -1,7 +1,7 @@
 import { FerroExports } from "./ferroui.js";
 import { loadModule } from "./ferroui-loader.js";
 import { mixes, tracks } from "./demo.js";
-import { Spotify, itemOf } from "./spotify.js";
+import { PLAYER_NAME, Spotify, itemOf } from "./spotify.js";
 import { AudioPath } from "./audio.js";
 import { spotifyClientId } from "./spotify-config.js";
 
@@ -170,7 +170,7 @@ async function navigate(next, id = "", preserveStatus = false) {
 
 async function getDevices() {
   if (!spotify.connected) { deviceRows = [{ id: "demo", title: "This device" }]; return; }
-  deviceRows = [{ id: "browser", title: "Play in this app" }];
+  deviceRows = [{ id: "browser", title: PLAYER_NAME }];
   try {
     const data = await spotify.request("/me/player/devices");
     deviceRows.push(...(data?.devices || []).filter(x => x.id && !x.is_restricted && x.id !== spotify.device)
@@ -209,7 +209,7 @@ async function transfer(id) {
   }
   spotify.active = output;
   refreshPlayback();
-  await navigate("devices");
+  if (page === "devices") await navigate("devices");
   notice("Playback device selected.");
 }
 function recordRecent(track) {
@@ -282,10 +282,10 @@ async function play(id) {
   render(false, true);
   syncQueue();
 }
-async function control(name, method = "PUT", extra = "") {
-  const output = spotify.active || await targetDevice();
+async function control(name, method = "PUT", extra = "", output = spotify.active, body) {
+  output ||= await targetDevice();
   recentCommandAt = performance.now();
-  await spotify.request("/me/player/" + name + deviceQuery(output) + extra, method);
+  await spotify.request("/me/player/" + name + deviceQuery(output) + extra, method, body);
 }
 async function toggle() {
   if (!spotify.connected) {
@@ -294,13 +294,25 @@ async function toggle() {
     return;
   }
   resumeCapture();
-  if (!current.id && items.length) return play(items.find(x => x.kind === "track")?.id || library[0]?.id);
+  if (!current.id) {
+    const first = items.find(x => x.kind === "track") || library[0];
+    if (first) return play(first.id);
+    return notice("Choose a track or playlist to start playback.");
+  }
   const nextPlaying = !playing;
   const version = connectionVersion;
   const track = current.id;
-  if (nextPlaying && spotify.active && spotify.active === spotify.device) await spotify.player?.activateElement();
+  const player = spotify.player;
+  if (nextPlaying && (!selected || selected === "browser")) await player?.activateElement();
+  const output = nextPlaying ? await targetDevice() : spotify.active;
+  if (nextPlaying && !player && output === spotify.device) await spotify.player.activateElement();
+  if (version !== connectionVersion) return;
+  const restart = nextPlaying && output !== spotify.active;
+  const body = restart ? { uris: [track], position_ms: Math.round(spotifyPosition() * 1000) } : undefined;
   playbackRevision++;
-  await control(nextPlaying ? "play" : "pause");
+  await control(nextPlaying ? "play" : "pause", "PUT", "", output, body);
+  if (version !== connectionVersion) return;
+  if (restart) spotify.active = output;
   refreshPlayback();
   // The SDK may already have reported the new state while the request was in flight.
   if (version !== connectionVersion || track !== current.id || playing === nextPlaying) return;

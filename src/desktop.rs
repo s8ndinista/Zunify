@@ -67,6 +67,8 @@ enum Update {
     Playback(Value),
     Queue(Vec<Item>),
     Liked(Item, bool),
+    StartedPlayback(String),
+    PlaybackNeedsDevice(Value),
     Device {
         id: String,
         started_playback: bool,
@@ -540,23 +542,18 @@ impl Desktop {
             "devices" => {
                 self.api(Some(version), false, false, |session| {
                     let data = session.get("/me/player/devices")?;
-                    let devices = data["devices"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|device| device["is_restricted"].as_bool() != Some(true))
-                        .filter_map(|device| {
-                            let id = device["id"].as_str()?.to_owned();
+                    let devices = available_devices(&data)
+                        .map(|(id, device)| {
                             let suffix = if device["is_active"].as_bool() == Some(true) {
                                 " · Active"
                             } else {
                                 ""
                             };
-                            Some(Item {
-                                id,
-                                title: format!("{}{suffix}", str_field(device, "name")),
+                            Item {
+                                id: id.to_owned(),
+                                title: format!("{}{suffix}", device_name(device)),
                                 ..Item::default()
-                            })
+                            }
                         })
                         .collect::<Vec<_>>();
                     let caption = if devices.is_empty() {
@@ -632,7 +629,7 @@ impl Desktop {
             if payload["uris"].as_array().is_some_and(Vec::is_empty) {
                 return Ok(());
             }
-            self.start_playback(payload);
+            self.start_playback(payload, false);
             return Ok(());
         }
         let mix = self.demo.mixes.iter().find(|mix| mix.item.id == target.id);
@@ -729,19 +726,14 @@ impl Desktop {
                 self.status("Choose a track or playlist to start playback.");
                 return Ok(());
             }
-            if !self.model.playing && self.playback_device().is_none() {
+            if !self.model.playing {
                 self.start_playback(json!({
                     "uris": [&self.model.current.id],
                     "position_ms": (self.position * 1000.0) as u64,
-                }));
+                }), true);
                 return Ok(());
             }
-            self.control(
-                if self.model.playing { "pause" } else { "play" },
-                Http::Put,
-                &[],
-                None,
-            );
+            self.control("pause", Http::Put, &[], None);
         } else if let Some(audio) = &self.audio
             && !audio.sink.empty()
         {
@@ -796,15 +788,26 @@ impl Desktop {
             .map(String::as_str)
     }
 
-    fn start_playback(&mut self, payload: Value) {
+    fn start_playback(&mut self, payload: Value, resume: bool) {
         self.cancel_seek();
-        if self.playback_device().is_some() {
-            self.control("play", Http::Put, &[], Some(payload));
-        } else {
-            self.pending_play = Some(payload);
-            self.navigate("devices", "");
-            self.status("Choose a playback device to start your selection.");
-        }
+        self.pending_play = None;
+        let selected = self.selected_device.clone();
+        let active = self.active_device.clone();
+        self.api(None, false, false, move |session| {
+            let device = if selected.is_empty() {
+                let devices = session.get("/me/player/devices")?;
+                let Some(device) = default_playback_device(&devices) else {
+                    return Ok(Update::PlaybackNeedsDevice(payload));
+                };
+                device.to_owned()
+            } else {
+                selected
+            };
+            let params = query(&[("device_id", &device)]);
+            let body = (!(resume && device == active)).then_some(payload);
+            session.request(Http::Put, &format!("/me/player/play?{params}"), body)?;
+            Ok(Update::StartedPlayback(device))
+        });
     }
 
     fn control(&self, endpoint: &str, method: Http, params: &[(&str, &str)], body: Option<Value>) {
@@ -1209,6 +1212,18 @@ impl Desktop {
                 }
             }
             Update::Liked(item, add) => self.apply_like(item, add),
+            Update::StartedPlayback(id) => {
+                self.active_device = id;
+                self.pending_play = None;
+                self.status("");
+                self.poll_playback();
+                self.poll_again_at = Some(Instant::now() + Duration::from_secs(1));
+                self.fetch_queue();
+            }
+            Update::PlaybackNeedsDevice(payload) => {
+                self.pending_play = Some(payload);
+                self.status("Zunify is unavailable. Open Playback devices to choose an output.");
+            }
             Update::Device {
                 id,
                 started_playback,
@@ -1387,6 +1402,41 @@ fn collection(session: &mut Session, target: Item) -> spotify::Result<Update> {
     Ok(Update::View(items, caption))
 }
 
+fn available_devices(data: &Value) -> impl Iterator<Item = (&str, &Value)> {
+    data["devices"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|device| device["is_restricted"].as_bool() != Some(true))
+        .filter_map(|device| {
+            let id = device["id"].as_str().filter(|id| !id.is_empty())?;
+            Some((id, device))
+        })
+}
+
+fn device_name(device: &Value) -> &str {
+    match str_field(device, "name") {
+        "SpotiFe" => "Zunify",
+        name => name,
+    }
+}
+
+fn default_playback_device(data: &Value) -> Option<&str> {
+    available_devices(data)
+        .filter_map(|(id, device)| {
+            let active = device["is_active"].as_bool() == Some(true);
+            let priority = match str_field(device, "name") {
+                "Zunify" => (2, active),
+                "SpotiFe" => (1, active),
+                _ if active => (0, true),
+                _ => return None,
+            };
+            Some((id, priority))
+        })
+        .max_by_key(|&(_, priority)| priority)
+        .map(|(id, _)| id)
+}
+
 fn device_selection_request(
     device: &str,
     pending: Option<Value>,
@@ -1479,6 +1529,22 @@ mod tests {
                 json!({"device_ids": ["connect-device"], "play": false}),
             ),
         );
+    }
+
+    #[test]
+    fn default_output_prefers_zunify_over_active_remote_playback() {
+        let mut devices = json!({"devices": [
+            {"id": "horizon", "name": "Horizon", "is_active": true},
+            {"id": "legacy", "name": "SpotiFe", "is_active": false},
+            {"id": "current", "name": "Zunify", "is_active": false}
+        ]});
+        assert_eq!(default_playback_device(&devices), Some("current"));
+        devices["devices"][2]["is_restricted"] = json!(true);
+        assert_eq!(default_playback_device(&devices), Some("legacy"));
+        devices["devices"][1]["id"] = Value::Null;
+        assert_eq!(default_playback_device(&devices), Some("horizon"));
+        devices["devices"][0]["is_active"] = json!(false);
+        assert_eq!(default_playback_device(&devices), None);
     }
 }
 

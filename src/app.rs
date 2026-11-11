@@ -1345,7 +1345,7 @@ fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     if m.page == "account" {
         page.children().add(header("Spotify account", ""));
         let explanation = if m.connected {
-            "Spotify is connected. Choose a Spotify Connect device to listen."
+            "Spotify is connected. Use Playback devices to change where music plays."
         } else if m.connecting {
             "Finish signing in on Spotify in your browser, then return to this window."
         } else {
@@ -1548,6 +1548,8 @@ impl<T: Clone + PartialEq + 'static> CollectionPane<T> {
 
 struct CollectionView {
     root: Ref<Grid>,
+    #[cfg(not(target_os = "emscripten"))]
+    status: Ref<TextBlock>,
     artists: CollectionPane<Option<String>>,
     playlists: CollectionPane<Vec<Item>>,
     songs: CollectionPane<(usize, Item)>,
@@ -1568,7 +1570,11 @@ impl CollectionView {
         } else {
             2
         };
-        let root = grid("", "Auto,Auto,Auto,*");
+        let root = grid("", if cfg!(target_os = "emscripten") {
+            "Auto,Auto,Auto,*"
+        } else {
+            "Auto,Auto,Auto,Auto,*"
+        });
         let inset = if compact { 16.0 } else { 44.0 };
         root.set_margin(Thickness::new(inset, 16.0, inset, 16.0));
         root.set_max_width(1370.0);
@@ -1653,10 +1659,20 @@ impl CollectionView {
             tab_row.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
             put(&root, 0, 2, tab_row.upcast());
         }
-        put(&root, 0, 3, catalog.upcast());
+        #[cfg(not(target_os = "emscripten"))]
+        let status = {
+            let text = label("", 13.0, "#BA1267");
+            text.set_text_wrapping(TextWrapping::Wrap);
+            text.set_margin(Thickness::new(0.0, 0.0, 0.0, 10.0));
+            put(&root, 0, 3, text.clone().upcast());
+            text
+        };
+        put(&root, 0, if cfg!(target_os = "emscripten") { 3 } else { 4 }, catalog.upcast());
 
         let view = Self {
             root,
+            #[cfg(not(target_os = "emscripten"))]
+            status,
             artists,
             playlists,
             songs,
@@ -1683,6 +1699,11 @@ impl CollectionView {
     }
 
     fn update(&self, m: &Model) {
+        #[cfg(not(target_os = "emscripten"))]
+        {
+            self.status.set_text(Some(&m.status));
+            self.status.set_is_visible(!m.status.is_empty());
+        }
         let selected = UI.with(|ui| ui.borrow().artist_filter.clone());
         let tracks = m.items.iter().filter(|item| item.kind == "track");
         let names = tracks
@@ -2277,6 +2298,7 @@ pub(crate) fn apply_model(model: Model, body: bool, playback: bool, reset: bool)
                         previous.page != model.page
                             || previous.items != model.items
                             || previous.collections != model.collections
+                            || previous.status != model.status
                     }
                     "home" => {
                         previous.page != model.page

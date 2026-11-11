@@ -127,8 +127,9 @@ test.describe("mocked Spotify integration", () => {
       await page.route("https://sdk.scdn.co/spotify-player.js", route => route.fulfill({
         contentType: "application/javascript",
         body: `window.Spotify={Player:class {
+          constructor({name}){this.name=name;}
           listeners={}; addListener(n,cb){this.listeners[n]=cb;}
-          connect(){window.mockSpotifyPlayer=this;queueMicrotask(()=>this.listeners.ready({device_id:"web-spotife"}));return Promise.resolve(true);}
+          connect(){window.mockSpotifyPlayer=this;queueMicrotask(()=>this.listeners.ready({device_id:"web-zunify"}));return Promise.resolve(true);}
           disconnect(){}
           getCurrentState(){return Promise.resolve(window.mockPlaybackState ?? null);}
           seek(ms){window.mockSeekCalls.push(ms);return Promise.resolve();}
@@ -166,6 +167,9 @@ test.describe("mocked Spotify integration", () => {
           });
           if (url.pathname === "/v1/me/tracks") return Response.json({ items: saved });
           if (url.pathname === "/v1/me/playlists") return Response.json({ items: playlists });
+          if (url.pathname === "/v1/me/player/devices") return Response.json({ devices: [
+            { id: "horizon", name: "Horizon" }, { id: "web-zunify", name: "Zunify" },
+          ] });
           if (largeLibrary && url.pathname === "/v1/me/player/next") {
             window.mockPlaybackState = {
               track_window: { current_track: saved[2].track }, paused: false, position: 0,
@@ -207,12 +211,14 @@ test.describe("mocked Spotify integration", () => {
         initialUris.push(...Array.from({ length: 76 }, (_, index) => "spotify:track:library" + (index + 1)));
       }
       await expect.poll(() => request("/v1/me/player/play")).toMatchObject({
-        params: { device_id: "web-spotife" }, body: { uris: initialUris },
+        params: { device_id: "web-zunify" }, body: { uris: initialUris },
         authorization: "Bearer test-token",
       });
+      expect(await page.evaluate(() => window.mockSpotifyPlayer.name)).toBe("Zunify");
+      await expect(button(page, "Refresh devices")).toHaveCount(0);
       await press(page, "Pause");
       await expect.poll(() => request("/v1/me/player/pause")).toMatchObject({
-        method: "PUT", params: { device_id: "web-spotife" },
+        method: "PUT", params: { device_id: "web-zunify" },
       });
       await expect(button(page, "Play")).toBeAttached();
       await expect(page.locator("#announcement")).toHaveText("");
@@ -238,6 +244,13 @@ test.describe("mocked Spotify integration", () => {
         await page.locator("#settings .close").click();
         await page.locator("#spectrum-toggle").evaluate(button => button.click());
         await expect(page.locator("#spectrum-toggle")).toHaveText("Show the spectrum for Spotify");
+        await press(page, "Account");
+        await button(page, "Play on this device").click();
+        await expect(page.locator("#settings")).not.toBeVisible();
+        await expect(button(page, "Refresh devices")).toHaveCount(0);
+        await press(page, "Select playback device");
+        await expect(button(page, "Zunify")).toHaveCount(1);
+        await expect(button(page, "Horizon")).toBeAttached();
       }
       if (mode === "shared") {
         const songs = page.getByRole("region", { name: "SONGS", exact: true });
