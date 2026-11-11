@@ -45,6 +45,7 @@ use std::{
 #[cfg(target_os = "emscripten")]
 use wasm_bindgen::prelude::*;
 
+const APP_NAME: &str = "Zunify";
 const BG: &str = "#130E15";
 const PANEL: &str = "#1E1720";
 const EDGE: &str = "#382C37";
@@ -167,7 +168,7 @@ impl NewApplication for App {
 impl ApplicationImpl for App {
     fn initialize(this: &Self) {
         Self::parent_initialize(this);
-        this.set_name(Some("SpotiFe".into()));
+        this.set_name(Some(APP_NAME.into()));
         this.set_requested_theme_variant(Some(ThemeVariant::dark()));
         this.styles().add(WinUITheme::new().as_style());
         for (key, ink) in [
@@ -206,7 +207,7 @@ impl ApplicationImpl for App {
                 }
             });
             let window = Window::new();
-            window.set_title(Some("SpotiFe".into()));
+            window.set_title(Some(APP_NAME.into()));
             window.set_width(1350.0);
             window.set_height(900.0);
             window.set_min_width(380.0);
@@ -229,7 +230,7 @@ fn install_desktop_title_bar(window: &Ref<ferroui_controls::Window>, shell: Ref<
     const TITLE_BAR_HEIGHT: f64 = 32.0; // WinUI's compact title bar height in DIPs.
 
     let title_bar = TitleBar::new();
-    title_bar.set_title("SpotiFe");
+    title_bar.set_title(APP_NAME);
     title_bar.set_background(Some(brush("#241A25")));
     title_bar.resources().set(
         "TitleBarTitleMargin",

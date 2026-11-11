@@ -173,7 +173,7 @@ export class Spotify {
     }
     if (generation !== this.generation) throw new Error("Spotify signed out.");
     const player = this.player = new window.Spotify.Player({
-      name: "SpotiFe",
+      name: "Zunify",
       getOAuthToken: callback => this.token().then(callback).catch(this.error),
       volume: 0.65,
     });

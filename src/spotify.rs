@@ -86,7 +86,7 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
             reply(
                 request,
                 404,
-                "This address is for the SpotiFe sign-in callback.",
+                "This address is for the Zunify sign-in callback.",
             );
             continue;
         }
@@ -95,7 +95,7 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
                 reply(
                     request,
                     200,
-                    "You can close this tab and return to SpotiFe to finish connecting.",
+                    "You can close this tab and return to Zunify to finish connecting.",
                 );
                 break code;
             }
@@ -103,7 +103,7 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
                 reply(
                     request,
                     200,
-                    "Spotify sign-in was cancelled. Return to SpotiFe.",
+                    "Spotify sign-in was cancelled. Return to Zunify.",
                 );
                 return Err("Spotify sign-in was cancelled.".into());
             }
@@ -111,7 +111,7 @@ pub fn authorize(client_id: String, cancelled: &AtomicBool) -> Result<Session> {
                 reply(
                     request,
                     400,
-                    "The sign-in response did not match this request. Return to SpotiFe and try again.",
+                    "The sign-in response did not match this request. Return to Zunify and try again.",
                 );
             }
         }

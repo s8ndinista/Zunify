@@ -18,7 +18,7 @@ const boot = async page => {
   await page.goto("./", { waitUntil: "domcontentloaded" });
   await expect(page.locator("#splash")).toHaveCount(0, { timeout: 45_000 });
   await expect(page.locator("#out canvas").first()).toBeVisible();
-  await expect(page).toHaveTitle("SpotiFe · Your music");
+  await expect(page).toHaveTitle("Zunify · Your music");
 };
 test("plays a bundled mix and supports queueing, liking and mobile layout", async ({ page }) => {
   const errors = [];
@@ -79,6 +79,7 @@ test("offline install caches the app and demo audio", async ({ page, context }) 
   await page.evaluate(() => navigator.serviceWorker.ready);
   await expect.poll(() => page.evaluate(() => Boolean(navigator.serviceWorker.controller))).toBe(true);
   const manifest = await page.evaluate(() => fetch("./manifest.webmanifest").then(r => r.json()));
+  expect(manifest.name).toBe("Zunify");
   expect(manifest.display).toBe("standalone");
   await context.setOffline(true);
   try {

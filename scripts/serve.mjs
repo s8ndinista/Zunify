@@ -57,6 +57,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const basePath = new URL(process.env.BASE_PATH || "/", "http://127.0.0.1").pathname.replace(/\/?$/, "/");
     const server = await serve(Number(process.env.PORT || 4173), basePath);
-    console.log(`SpotiFe: http://127.0.0.1:${server.address().port}${basePath}`);
+    console.log(`Zunify: http://127.0.0.1:${server.address().port}${basePath}`);
   } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

@@ -1,4 +1,4 @@
-# SpotiFe
+# Zunify
 
 A native desktop and browser port of [Spotifast](https://github.com/crmne/spotifast), styled after the [Zune 4 desktop player](https://blogs.windows.com/windowsexperience/2009/09/15/new-zune-software-update-for-zune-4-0-optimized-for-windows-7/). Quickplay brings together pins, new music, and listening history. Collection has artist, playlist, and song panes. Now Playing puts the current cover and queue over a tinted wall of album art.
 
@@ -11,7 +11,7 @@ git submodule update --init --recursive
 cargo run --locked
 ```
 
-FerroUI opens a native window and the demo plays through the system audio output. On macOS, run `scripts/bundle-macos.sh` to build a local [SpotiFe.app](dist-desktop/SpotiFe.app) bundle that opens from Finder. On Linux, install the ALSA development headers required by the audio backend.
+FerroUI opens a native window and the demo plays through the system audio output. On macOS, run `scripts/bundle-macos.sh` to build a local [Zunify.app](dist-desktop/Zunify.app) bundle that opens from Finder. On Linux, install the ALSA development headers required by the audio backend.
 
 ## Run in the browser
 
@@ -34,9 +34,9 @@ You can also install the browser build from Chrome or Edge’s app menu. It cach
 
 The app publisher registers one Spotify developer app. Listeners click **Connect Spotify**, sign in on Spotify, and approve access. They use their regular Spotify accounts.
 
-1. In Spotify’s developer dashboard, create an app and enable **Web API**. Enable **Web Playback SDK** for browser playback. The registered app name appears on the consent screen. Spotify’s naming policy cautions against names beginning with “Spot”, so check the release name before distributing a Spotify-connected build. [Spotify app registration](https://developer.spotify.com/documentation/web-api/concepts/apps) · [Spotify naming policy](https://developer.spotify.com/policy)
+1. In Spotify’s developer dashboard, create an app and enable **Web API**. Enable **Web Playback SDK** for browser playback. The registered app name appears on the consent screen. [Spotify app registration](https://developer.spotify.com/documentation/web-api/concepts/apps)
 2. Add each redirect URL to the same Spotify app and use the same Client ID for both builds. The native callback is `http://127.0.0.1:4176/spotify/callback`. The local browser preview uses `http://127.0.0.1:4173/`. The hosted callback is `https://s8ndinista.github.io/Zunify/`. Register the exact URLs, including the repository path and trailing slash for the hosted build. [Spotify redirect URI rules](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri)
-3. The native build includes the shared public Client ID. Supply `SPOTIFY_CLIENT_ID` to use a different registration or configure the browser build. SpotiFe uses OAuth with PKCE and keeps tokens in the running session. Keep the Client Secret out of the build. [Spotify PKCE flow](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
+3. The native build includes the shared public Client ID. Supply `SPOTIFY_CLIENT_ID` to use a different registration or configure the browser build. Zunify uses OAuth with PKCE and keeps tokens in the running session. Keep the Client Secret out of the build. [Spotify PKCE flow](https://developer.spotify.com/documentation/web-api/tutorials/code-pkce-flow)
 
 ```sh
 export SPOTIFY_CLIENT_ID="YOUR_PUBLIC_CLIENT_ID"
