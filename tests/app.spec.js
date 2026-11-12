@@ -23,6 +23,66 @@ const boot = async page => {
   await expect(page).toHaveTitle("Zunify · Your music");
 };
 
+test("Now Playing fades one cover at a time and preserves the wall across track changes", async ({ page }) => {
+  await boot(page);
+  await page.evaluate(async () => {
+    const { FerroExports } = await import(new URL("ferroui.js", location.href));
+    const runtime = FerroExports.runtime;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 16;
+    const ctx = canvas.getContext("2d");
+    const colors = ["#ff0000", "#ffff00", "#00ff00", "#00ffff", "#0000ff", "#ff00ff"];
+    const covers = [];
+    for (const [index, color] of colors.entries()) {
+      const url = `local-cover:wall-${index}`;
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, 16, 16);
+      const blob = await new Promise(resolve => canvas.toBlob(resolve));
+      runtime.setImage(url, new Uint8Array(await blob.arrayBuffer()));
+      covers.push(url);
+    }
+    window.showArtWall = title => runtime.updateModel(JSON.stringify({
+      page: "queue", collection_art: covers, current: { id: title, title },
+    }), true, true, false);
+    window.showArtWall("First track");
+  });
+  const topRow = async () => {
+    const strip = await page.screenshot({ clip: { x: 0, y: 120, width: 1440, height: 1 } });
+    return page.evaluate(async png => {
+      const bitmap = await createImageBitmap(await (await fetch(png)).blob());
+      const ctx = new OffscreenCanvas(bitmap.width, 1).getContext("2d");
+      ctx.drawImage(bitmap, 0, 0);
+      const pixels = ctx.getImageData(0, 0, bitmap.width, 1).data;
+      return Array.from({ length: 8 }, (_, index) => {
+        const x = Math.floor((index + 0.5) * bitmap.width / 8) * 4;
+        return pixels.slice(x, x + 3).join(",");
+      });
+    }, `data:image/png;base64,${strip.toString("base64")}`);
+  };
+  let initial;
+  await expect.poll(async () => {
+    initial = await topRow();
+    return new Set(initial).size;
+  }).toBeGreaterThan(3);
+
+  const shades = new Set();
+  await expect.poll(async () => {
+    const row = await topRow();
+    if (row[0] !== initial[0]) shades.add(row[0]);
+    expect(row.slice(1)).toEqual(initial.slice(1));
+    return shades.size;
+  }, { intervals: [75], timeout: 8000 }).toBeGreaterThan(2);
+
+  // The fade settles before the next tile changes. Refreshing the foreground should keep that tile.
+  await page.waitForTimeout(700);
+  const settled = await topRow();
+  expect(settled[0]).not.toBe(initial[0]);
+  expect(settled.slice(1)).toEqual(initial.slice(1));
+  await page.evaluate(() => window.showArtWall("Second track"));
+  await expect(page.getByText("Second track", { exact: true }).first()).toBeAttached();
+  expect(await topRow()).toEqual(settled);
+});
+
 function taggedWave(title, album = "Folder album", cover, artist = "Folder artist") {
   const chunk = (name, bytes) => {
     const header = Buffer.alloc(8);

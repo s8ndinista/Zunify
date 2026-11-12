@@ -339,6 +339,14 @@ impl TransportFire {
 }
 
 pub(crate) fn entrance(host: &Ref<Border>, distance: f32, delay_ms: u64) {
+    fade_entrance(host, Duration::from_millis(300), distance, delay_ms);
+}
+
+pub(crate) fn fade_in(host: &Ref<Border>, duration: Duration) {
+    fade_entrance(host, duration, 0.0, 0);
+}
+
+fn fade_entrance(host: &Ref<Border>, duration: Duration, distance: f32, delay_ms: u64) {
     let weak = host.downgrade();
     host.attached_to_visual_tree(move |_| {
         let weak = weak.clone();
@@ -349,7 +357,6 @@ pub(crate) fn entrance(host: &Ref<Border>, distance: f32, delay_ms: u64) {
                     return;
                 };
                 let compositor = visual.compositor();
-                let duration = Duration::from_millis(300);
                 let delay = Duration::from_millis(delay_ms);
                 let opacity = compositor.create_scalar_key_frame_animation();
                 opacity.insert_key_frame(0.0, 0.0);
@@ -359,13 +366,15 @@ pub(crate) fn entrance(host: &Ref<Border>, distance: f32, delay_ms: u64) {
                 opacity.set_delay_behavior(AnimationDelayBehavior::SetInitialValueBeforeDelay);
                 visual.start_animation("Opacity", &*opacity);
 
-                let translation = compositor.create_vector3_key_frame_animation();
-                translation.insert_key_frame(0.0, Vector3::new(distance, 0.0, 0.0));
-                translation.insert_key_frame(1.0, Vector3::default());
-                translation.set_duration(duration);
-                translation.set_delay_time(delay);
-                translation.set_delay_behavior(AnimationDelayBehavior::SetInitialValueBeforeDelay);
-                visual.start_animation("Translation", &*translation);
+                if distance != 0.0 {
+                    let translation = compositor.create_vector3_key_frame_animation();
+                    translation.insert_key_frame(0.0, Vector3::new(distance, 0.0, 0.0));
+                    translation.insert_key_frame(1.0, Vector3::default());
+                    translation.set_duration(duration);
+                    translation.set_delay_time(delay);
+                    translation.set_delay_behavior(AnimationDelayBehavior::SetInitialValueBeforeDelay);
+                    visual.start_animation("Translation", &*translation);
+                }
             },
             DispatcherPriority::NORMAL,
         );

@@ -15,7 +15,9 @@ use ferroui_base::{
         Stretch, TextTrimming, TextWrapping, effects::ImmutableDropShadowEffect, imaging::Bitmap,
         immutable::ImmutableSolidColorBrush,
     },
+    reactive::Subscription,
     styling::ThemeVariant,
+    threading::{DispatcherPriority, DispatcherTimer},
 };
 #[cfg(target_os = "emscripten")]
 use ferroui_browser::{BrowserAccessibilityMode, BrowserAppBuilder, BrowserPlatformOptions};
@@ -47,6 +49,7 @@ use std::{
     collections::HashMap,
     io::Cursor,
     rc::Rc,
+    time::{Duration, Instant},
 };
 #[cfg(target_os = "emscripten")]
 use wasm_bindgen::prelude::*;
@@ -138,7 +141,7 @@ struct Ui {
     account_label: Option<Ref<TextBlock>>,
     artist_filter: Option<String>,
     album_filter: Option<String>,
-    now_stage: Option<WeakRef<Grid>>,
+    now_playing: Option<Rc<NowPlayingView>>,
     search: Option<Ref<TextBox>>,
     seek: Option<Ref<Slider>>,
     elapsed: Option<Ref<TextBlock>>,
@@ -714,15 +717,16 @@ fn reveal(b: &Ref<Border>) {
     );
 }
 fn cover(url: &str, height: f64, radius: f64) -> Ref<Border> {
-    let external = url.starts_with("https://");
-    let frame = surface_view("#2A202B", 0.0, if external { 0.0 } else { radius })
-        .height(height)
-        .clip_to_bounds(true);
     if url.is_empty() {
         let glyph = icon("music", ACCENT, height.min(54.0) * 0.46);
         glyph.set_horizontal_alignment(H::Center);
-        return mount(frame.child(glyph));
+        return mount(surface_view("#2A202B", 0.0, radius).height(height).clip_to_bounds(true).child(glyph));
     }
+    cover_image(url, height, radius).0
+}
+
+fn cover_image(url: &str, height: f64, radius: f64) -> (Ref<Border>, Ref<Image>) {
+    let external = url.starts_with("https://");
     let image = mount(
         ui::image()
             .stretch(if external {
@@ -732,7 +736,12 @@ fn cover(url: &str, height: f64, radius: f64) -> Ref<Border> {
             })
             .is_hit_test_visible(false),
     );
-    let b = mount(frame.child(image.clone()));
+    let frame = mount(
+        surface_view("#2A202B", 0.0, if external { 0.0 } else { radius })
+            .height(height)
+            .clip_to_bounds(true)
+            .child(image.clone()),
+    );
     let need = UI.with(|ui| {
         let mut ui = ui.borrow_mut();
         if let Some(bitmap) = ui.art.get(url) {
@@ -748,7 +757,7 @@ fn cover(url: &str, height: f64, radius: f64) -> Ref<Border> {
     if need {
         send("art", url);
     }
-    b
+    (frame, image)
 }
 fn scroll() -> Ref<ScrollViewer> {
     let template: Rc<dyn IControlTemplate> =
@@ -948,8 +957,10 @@ fn build() {
             use ferroui_base::threading::{Dispatcher, DispatcherPriority};
             Dispatcher::ui_thread().post_local(
                 move || {
-                    let stage =
-                        UI.with(|ui| ui.borrow().now_stage.as_ref().and_then(WeakRef::upgrade));
+                    let stage = UI.with(|ui| {
+                        ui.borrow().now_playing.as_ref().filter(|view| !view.mobile)
+                            .map(|view| view.stage.clone())
+                    });
                     if let Some(stage) = stage {
                         stage.set_height(height.max(340.0));
                     }
@@ -998,6 +1009,7 @@ fn build() {
         s.body = Some(body);
         s.main = Some(main);
         s.collection = None;
+        s.now_playing = None;
         s.footer = Some(footer);
         s.chrome = Some(chrome);
         s.transport = Some(transport);
@@ -1580,9 +1592,6 @@ fn track_row(
 fn main_page(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     if m.page == "home" {
         return quickplay(m, width, animate);
-    }
-    if matches!(m.page.as_str(), "queue" | "local-queue") {
-        return now_playing(m, width, animate);
     }
     let mobile = width < 790.0;
     let page = stack(if mobile { 12.0 } else { 15.0 });
@@ -2256,6 +2265,7 @@ fn artist_button(artist: &Option<String>) -> Ref<Control> {
 
 struct WallArt {
     covers: Vec<String>,
+    order: Vec<usize>,
     next: usize,
     random: u64,
 }
@@ -2267,6 +2277,7 @@ impl WallArt {
             .map_or(1, |time| time.as_nanos() as u64);
         let next = covers.len();
         Self {
+            order: (0..next).collect(),
             covers,
             next,
             random: seed.max(1),
@@ -2275,90 +2286,141 @@ impl WallArt {
 
     fn next_cover(&mut self) -> &str {
         if self.next == self.covers.len() {
-            for index in (1..self.covers.len()).rev() {
+            for index in (1..self.order.len()).rev() {
                 self.random ^= self.random << 13;
                 self.random ^= self.random >> 7;
                 self.random ^= self.random << 17;
-                self.covers
+                self.order
                     .swap(index, (self.random % (index as u64 + 1)) as usize);
             }
             self.next = 0;
         }
         let index = self.next;
         self.next += 1;
-        &self.covers[index]
+        &self.covers[self.order[index]]
     }
 }
 
-fn fill_art_wall(wall: &Grid, columns: usize, art: &mut WallArt) {
-    wall.children().clear();
-    for row in 0..3 {
-        for column in 0..columns {
-            let cell = cover(art.next_cover(), f64::NAN, 0.0);
-            cell.set_margin(Thickness::uniform(1.0));
-            put(wall, column as i32, row, cell.upcast());
+struct WallCover {
+    tile: usize,
+    url: String,
+    frame: Ref<Border>,
+    image: Ref<Image>,
+    requested_at: Instant,
+}
+
+struct ArtWall {
+    tiles: Vec<Ref<Grid>>,
+    displayed: Vec<String>,
+    art: WallArt,
+    next_tile: usize,
+    pending: Option<WallCover>,
+    fading_tile: Option<usize>,
+}
+
+impl ArtWall {
+    fn new(root: &Grid, columns: usize) -> Self {
+        let tiles = (0..3 * columns)
+            .map(|index| {
+                let tile = grid("", "");
+                tile.set_margin(Thickness::uniform(1.0));
+                tile.set_clip_to_bounds(true);
+                put(root, (index % columns) as i32, (index / columns) as i32, tile.clone().upcast());
+                tile
+            })
+            .collect();
+        Self {
+            tiles,
+            displayed: Vec::new(),
+            art: WallArt::new(Vec::new()),
+            next_tile: 0,
+            pending: None,
+            fading_tile: None,
         }
     }
+
+    fn set_covers(&mut self, covers: Vec<String>, reduced: bool) {
+        if self.art.covers == covers {
+            return;
+        }
+        self.art = WallArt::new(covers);
+        self.pending = None;
+        if self.displayed.is_empty() || self.art.covers.len() <= 1 || reduced {
+            self.fading_tile = None;
+            self.displayed.clear();
+            for tile in &self.tiles {
+                tile.children().clear();
+                if !self.art.covers.is_empty() {
+                    let url = self.art.next_cover();
+                    put(tile, 0, 0, cover(url, f64::NAN, 0.0).upcast());
+                    self.displayed.push(url.to_owned());
+                }
+            }
+        }
+    }
+
+    fn advance(&mut self) {
+        if let Some(index) = self.fading_tile.take() {
+            self.tiles[index].children().remove_at(0);
+        }
+        if let Some(incoming) = self.pending.take() {
+            if incoming.image.source().is_some() {
+                let index = incoming.tile;
+                effects::fade_in(&incoming.frame, Duration::from_millis(650));
+                put(&self.tiles[index], 0, 0, incoming.frame.upcast());
+                self.displayed[index] = incoming.url;
+                self.fading_tile = Some(index);
+            } else if incoming.requested_at.elapsed() < Duration::from_secs(5)
+                && UI.with(|ui| ui.borrow().waiting.contains_key(&incoming.url))
+            {
+                self.pending = Some(incoming);
+                return;
+            }
+        }
+
+        // This step visits every tile in the 12- and 24-tile grids, spreading changes across the wall.
+        let tile = self.next_tile;
+        self.next_tile = (tile + 5) % self.tiles.len();
+        let url = loop {
+            let url = self.art.next_cover();
+            if url != self.displayed[tile] {
+                break url.to_owned();
+            }
+        };
+        let (frame, image) = cover_image(&url, f64::NAN, 0.0);
+        self.pending = Some(WallCover { tile, url, frame, image, requested_at: Instant::now() });
+    }
 }
 
-fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
-    let mobile = width < 790.0;
-    let stage = grid("", "");
-    stage.set_clip_to_bounds(true);
-    if !mobile {
-        let viewport = UI.with(|ui| {
-            ui.borrow()
-                .body
-                .as_ref()
-                .map_or(480.0, |body| body.bounds().height)
-        });
-        stage.set_height(viewport.max(340.0));
-        UI.with(|ui| ui.borrow_mut().now_stage = Some(stage.downgrade()));
-    }
-    stage.set_background(Some(brush(BG)));
+struct NowPlayingView {
+    mobile: bool,
+    root: Ref<Grid>,
+    stage: Ref<Grid>,
+    focus: Ref<Grid>,
+    queue: Ref<Border>,
+    tint: Ref<Border>,
+    wall: Rc<RefCell<ArtWall>>,
+    timer: RefCell<Option<Subscription>>,
+}
 
-    let mut seen = std::collections::HashSet::new();
-    let covers: Vec<_> = m
-        .collection_art
-        .iter()
-        .chain(
-            m.collections
-                .iter()
-                .chain(&m.queue)
-                .chain(&m.recent)
-                .chain(std::iter::once(&m.current))
-                .map(|item| &item.art),
-        )
-        .filter(|art| !art.is_empty() && seen.insert(art.as_str()))
-        .cloned()
-        .collect();
-    if !covers.is_empty() {
+impl NowPlayingView {
+    fn new(width: f64) -> Self {
+        let mobile = width < 790.0;
+        let stage = grid("", "");
+        stage.set_clip_to_bounds(true);
+        stage.set_background(Some(brush(BG)));
+        if !mobile {
+            let viewport = UI.with(|ui| {
+                ui.borrow().body.as_ref().map_or(480.0, |body| body.bounds().height)
+            });
+            stage.set_height(viewport.max(340.0));
+        }
+
         let columns = if mobile { 4 } else { 8 };
-        let wall = grid(&vec!["*"; columns].join(","), "*,*,*");
-        wall.set_is_hit_test_visible(false);
-        let mut art = WallArt::new(covers);
-        fill_art_wall(&wall, columns, &mut art);
-        if art.covers.len() > 1 && !UI.with(|ui| ui.borrow().reduced) {
-            use ferroui_base::threading::{DispatcherPriority, DispatcherTimer};
-            let weak = wall.downgrade();
-            let art = RefCell::new(art);
-            DispatcherTimer::run(
-                move || {
-                    let Some(wall) = weak
-                        .upgrade()
-                        .filter(|wall| wall.is_attached_to_visual_tree())
-                    else {
-                        return false;
-                    };
-                    fill_art_wall(&wall, columns, &mut art.borrow_mut());
-                    true
-                },
-                std::time::Duration::from_secs(10),
-                DispatcherPriority::NORMAL,
-            )
-            .detach();
-        }
-        put(&stage, 0, 0, wall.upcast());
+        let wall_grid = grid(&["*"; 8][..columns].join(","), "*,*,*");
+        wall_grid.set_is_hit_test_visible(false);
+        let wall = Rc::new(RefCell::new(ArtWall::new(&wall_grid, columns)));
+        put(&stage, 0, 0, wall_grid.upcast());
         let tint = surface(BG, 0.0, 0.0);
         let brush = LinearGradientBrush::new();
         brush.set_end_point(RelativePoint::new(1.0, 0.35, RelativeUnit::Relative));
@@ -2369,8 +2431,57 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         }
         tint.set_background(Some(brush.into()));
         tint.set_is_hit_test_visible(false);
-        put(&stage, 0, 0, tint.upcast());
+        put(&stage, 0, 0, tint.clone().upcast());
+
+        let focus = grid("", "");
+        put(&stage, 0, 0, focus.clone().upcast());
+        let root = grid("", if mobile { "3*,2*" } else { "*" });
+        put(&root, 0, 0, stage.clone().upcast());
+        let queue = surface(if mobile { BG } else { "#D51B121D" }, 13.0, 0.0);
+        if mobile {
+            put(&root, 0, 1, queue.clone().upcast());
+        } else {
+            queue.set_max_height(316.0);
+            queue.set_horizontal_alignment(H::Right);
+            queue.set_vertical_alignment(V::Center);
+            queue.set_margin(Thickness::new(0.0, 12.0, 26.0, 12.0));
+            put(&stage, 0, 0, queue.clone().upcast());
+        }
+        Self { mobile, root, stage, focus, queue, tint, wall, timer: RefCell::new(None) }
     }
+
+    fn update_wall(&self, m: &Model, reduced: bool) {
+        let mut covers: Vec<_> = m.collection_art.iter().chain(
+            m.collections.iter().chain(&m.queue).chain(&m.recent)
+                .chain(std::iter::once(&m.current)).map(|item| &item.art),
+        ).filter(|art| !art.is_empty()).cloned().collect();
+        covers.sort_unstable();
+        covers.dedup();
+        let rotate = covers.len() > 1 && !reduced;
+        self.tint.set_is_visible(!covers.is_empty());
+        self.wall.borrow_mut().set_covers(covers, reduced);
+
+        let mut timer = self.timer.borrow_mut();
+        if rotate && timer.is_none() {
+            let wall = Rc::downgrade(&self.wall);
+            *timer = Some(DispatcherTimer::run(
+                move || {
+                    let Some(wall) = wall.upgrade() else { return false };
+                    wall.borrow_mut().advance();
+                    true
+                },
+                Duration::from_secs(2),
+                DispatcherPriority::BACKGROUND,
+            ));
+        } else if !rotate {
+            *timer = None;
+        }
+    }
+}
+
+fn update_now_playing(view: &NowPlayingView, m: &Model, width: f64, animate: bool, reduced: bool) {
+    view.update_wall(m, reduced);
+    let mobile = view.mobile;
     let identity = grid("*,Auto,Auto", "");
     let names = stack(3.0);
     names.children().add(
@@ -2459,7 +2570,8 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
     if animate {
         effects::entrance(&frame, 32.0, 0);
     }
-    put(&stage, 0, 0, frame.upcast());
+    view.focus.children().clear();
+    put(&view.focus, 0, 0, frame.upcast());
     let p = grid("", "Auto,*");
     let q = grid("*,Auto", "");
     put(
@@ -2504,21 +2616,10 @@ fn now_playing(m: &Model, width: f64, animate: bool) -> Ref<Control> {
         ))));
         put(&p, 0, 1, list.upcast());
     }
-    let page = grid("", if mobile { "3*,2*" } else { "*" });
-    put(&page, 0, 0, stage.clone().upcast());
-    let queue = surface(if mobile { BG } else { "#D51B121D" }, 13.0, 0.0);
-    queue.set_child(p);
-    if mobile {
-        put(&page, 0, 1, queue.upcast());
-    } else {
-        queue.set_width((width * 0.27).clamp(255.0, 356.0));
-        queue.set_max_height(316.0);
-        queue.set_horizontal_alignment(H::Right);
-        queue.set_vertical_alignment(V::Center);
-        queue.set_margin(Thickness::new(0.0, 12.0, 26.0, 12.0));
-        put(&stage, 0, 0, queue.upcast());
+    if !mobile {
+        view.queue.set_width((width * 0.27).clamp(255.0, 356.0));
     }
-    page.upcast()
+    view.queue.set_child(p);
 }
 fn time(s: f64) -> String {
     let s = s.max(0.0) as u64;
@@ -2795,7 +2896,10 @@ fn refresh(body: bool, playback: bool, animate: bool) {
             text.set_foreground(Some(brush(if selected { TEXT } else { MUTED })));
         }
         if let Some(host) = host {
-            UI.with(|ui| ui.borrow_mut().now_stage = None);
+            let now_playing = matches!(m.page.as_str(), "queue" | "local-queue");
+            if !now_playing {
+                UI.with(|ui| ui.borrow_mut().now_playing = None);
+            }
             host.set_background(Some(brush(BG)));
             if matches!(m.page.as_str(), "library" | "local") {
                 let local = m.page == "local";
@@ -2818,8 +2922,23 @@ fn refresh(body: bool, playback: bool, animate: bool) {
                     view
                 });
                 view.update(&m);
-            } else if bounded_catalog(&m.page) || matches!(m.page.as_str(), "queue" | "local-queue")
-            {
+            } else if now_playing {
+                let existing = UI.with(|ui| {
+                    let mut ui = ui.borrow_mut();
+                    ui.collection = None;
+                    ui.now_playing.clone()
+                });
+                let view = existing.unwrap_or_else(|| {
+                    let view = Rc::new(NowPlayingView::new(width));
+                    if let Some(main) = &main {
+                        main.set_content(None);
+                    }
+                    host.set_child(view.root.clone());
+                    UI.with(|ui| ui.borrow_mut().now_playing = Some(view.clone()));
+                    view
+                });
+                update_now_playing(&view, &m, width, animate && !reduced, reduced);
+            } else if bounded_catalog(&m.page) {
                 UI.with(|ui| ui.borrow_mut().collection = None);
                 if let Some(main) = &main {
                     main.set_content(None);
